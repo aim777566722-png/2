@@ -1,0 +1,6 @@
+{
+  "name": "مساعد المشتريات",
+  "description": "تطبيق لإدارة مشتريات الصيدليات ومقارنة أسعار السوق",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
