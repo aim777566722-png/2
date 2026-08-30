@@ -28,15 +28,17 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Gradle 8.13
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
-          cache-disabled: true
+      - name: Install Gradle 8.13
+        run: |
+          curl --fail --location --retry 3 -o /tmp/gradle-8.13-bin.zip https://services.gradle.org/distributions/gradle-8.13-bin.zip
+          unzip -q /tmp/gradle-8.13-bin.zip -d /tmp
+          echo "/tmp/gradle-8.13/bin" >> "$GITHUB_PATH"
+          /tmp/gradle-8.13/bin/gradle --version
 
       - name: Regenerate Gradle Wrapper
         working-directory: android
         run: |
+          rm -f gradle/wrapper/gradle-wrapper.jar
           gradle wrapper --gradle-version 8.13 --distribution-type bin
           test -s gradle/wrapper/gradle-wrapper.jar
           jar tf gradle/wrapper/gradle-wrapper.jar | grep -q 'org/gradle/wrapper/GradleWrapperMain.class'
