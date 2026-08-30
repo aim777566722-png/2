@@ -1,5 +1,5 @@
 name = "document-ai-api"
+main = "cloudflare-worker.ts"
 compatibility_date = "2026-08-30"
 
-[vars]
-# GEMINI_API_KEY must be added as a Cloudflare Secret; do not commit it.
+# Add GEMINI_API_KEY as a Cloudflare Secret. Never commit the key.
