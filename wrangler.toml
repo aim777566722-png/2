@@ -1,0 +1,5 @@
+name = "document-ai-api"
+compatibility_date = "2026-08-30"
+
+[vars]
+# GEMINI_API_KEY must be added as a Cloudflare Secret; do not commit it.
