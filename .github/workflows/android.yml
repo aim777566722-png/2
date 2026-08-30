@@ -28,15 +28,21 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Gradle Cache
-        uses: actions/cache@v4
+      - name: Setup Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
         with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            ${{ runner.os }}-gradle-
+          gradle-version: '8.13'
+
+      - name: Setup Gradle Wrapper
+        working-directory: android
+        run: gradle wrapper --gradle-version 8.13 --distribution-type bin
+
+      - name: Verify Gradle Wrapper
+        working-directory: android
+        run: |
+          test -s gradle/wrapper/gradle-wrapper.jar
+          jar tf gradle/wrapper/gradle-wrapper.jar | grep -q 'org/gradle/wrapper/GradleWrapperMain.class'
+          ./gradlew --version
 
       - name: Install Dependencies
         run: npm install
@@ -51,14 +57,6 @@ jobs:
         run: |
           test -f android/app/capacitor.build.gradle
           test -d android/capacitor-cordova-android-plugins
-
-      - name: Restore Gradle Wrapper JAR
-        run: |
-          curl --fail --location --retry 3 \
-            -o android/gradle/wrapper/gradle-wrapper.jar \
-            https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar
-          test -s android/gradle/wrapper/gradle-wrapper.jar
-          file android/gradle/wrapper/gradle-wrapper.jar
 
       - name: Make Gradlew Executable
         run: chmod +x android/gradlew
