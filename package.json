@@ -13,10 +13,10 @@
     "cap:sync": "cap sync"
   },
   "dependencies": {
-    "@capacitor/android": "^8.5.0",
-    "@capacitor/app": "^8.1.1",
-    "@capacitor/cli": "^8.5.0",
-    "@capacitor/core": "^8.5.0",
+    "@capacitor/android": "8.5.0",
+    "@capacitor/app": "8.5.0",
+    "@capacitor/cli": "8.5.0",
+    "@capacitor/core": "8.5.0",
     "@fontsource/cairo": "^5.3.0",
     "@fontsource/plus-jakarta-sans": "^5.3.0",
     "@google/genai": "^2.4.0",
