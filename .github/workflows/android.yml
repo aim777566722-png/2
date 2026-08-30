@@ -52,6 +52,14 @@ jobs:
           test -f android/app/capacitor.build.gradle
           test -d android/capacitor-cordova-android-plugins
 
+      - name: Restore Gradle Wrapper JAR
+        run: |
+          curl --fail --location --retry 3 \
+            -o android/gradle/wrapper/gradle-wrapper.jar \
+            https://raw.githubusercontent.com/gradle/gradle/v8.13.0/gradle/wrapper/gradle-wrapper.jar
+          test -s android/gradle/wrapper/gradle-wrapper.jar
+          file android/gradle/wrapper/gradle-wrapper.jar
+
       - name: Make Gradlew Executable
         run: chmod +x android/gradlew
 
