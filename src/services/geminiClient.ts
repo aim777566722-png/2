@@ -1,16 +1,20 @@
 /**
  * Pharmacy AI Service - Full-Stack Client Proxy
- * 
+ *
  * Proxies all Gemini AI extraction requests through server-side (/api/*) endpoints
- * where process.env.GEMINI_API_KEY is securely maintained.
- * This guarantees seamless AI extraction for all users (including friends on shared URLs)
- * without any "Permission Denied" or client-side API key restrictions.
+ * where the Gemini API key is securely maintained.
+ *
+ * IMPORTANT: Native Android builds do not have a normal web origin, so an empty
+ * API base URL would send /api/* requests to the local app instead of Cloudflare.
+ * The production Cloudflare Worker is therefore the safe default. A VITE_API_BASE_URL
+ * value can still override it for development or another deployment.
  */
 import { Medicine, Supplier } from '../types';
 import { mapTableDataToMedicineItems } from '../utils/documentParser';
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 
-const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || '').replace(/\/$/, '');
+const DEFAULT_API_BASE_URL = 'https://document-ai-api.aim777566722.workers.dev';
+const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 
 export type ProgressCallback = (progress: number, stepText: string, stageIndex?: number) => void;
 
@@ -396,62 +400,79 @@ export async function matchOrderWithInvoiceClientSide(params: {
       success: true,
       data: {
         matchedCount: 0,
-        unmatchedOrderCount: orderItems.length,
-        unmatchedInvoiceCount: invoiceItems.length,
-        totalPriceDifference: 0,
-        comparisons: [],
-        recommendations: ['تمت المقارنة محلياً']
+        unmatchedOrderItems: orderItems,
+        unmatchedInvoiceItems: invoiceItems,
+        differences: [],
+        recommendations: []
       },
       fallbackUsed: true
     };
   } catch (err: any) {
+    console.warn('Network error in match-order-invoice:', err?.message || err);
     return {
       success: true,
       data: {
         matchedCount: 0,
-        unmatchedOrderCount: orderItems.length,
-        unmatchedInvoiceCount: invoiceItems.length,
-        totalPriceDifference: 0,
-        comparisons: [],
-        recommendations: ['تمت المقارنة محلياً']
+        unmatchedOrderItems: orderItems,
+        unmatchedInvoiceItems: invoiceItems,
+        differences: [],
+        recommendations: []
       },
       fallbackUsed: true
     };
   }
 }
 
-// Local smart fallback parser for documents (supports 10,000+ items)
-function clientFallbackParseDocument(
-  fileText: string,
-  tableData: any[],
-  fileName: string,
-  knownMedicines: string[],
-  knownSuppliers: string[]
-) {
-  const items = mapTableDataToMedicineItems(tableData, fileText);
+/**
+ * 6. Extract raw text from a document using the server's AI endpoint.
+ */
+export async function extractDocumentTextClientSide(params: {
+  fileName?: string;
+  fileText?: string;
+  images?: Array<{ name?: string; base64: string; mimeType?: string }>;
+  documentType?: 'order' | 'invoice' | 'price_list';
+  knownMedicines?: string[];
+  knownSuppliers?: string[];
+  onProgress?: ProgressCallback;
+}) {
+  const { fileName = '', fileText = '', images = [], documentType = 'order', knownMedicines = [], knownSuppliers = [], onProgress } = params;
+  if (onProgress) onProgress(20, 'جاري إرسال الوثيقة إلى خادم الذكاء الاصطناعي...', 1);
 
-  const isInvoice = (fileName || '').includes('فاتورة') || (fileText || '').includes('فاتورة') || (fileText || '').includes('سعر');
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/parse-document`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileName,
+        fileText: fileText || undefined,
+        images: images && images.length > 0 ? images : undefined,
+        imagesBase64: images && images.length > 0 ? images.map(img => img.base64) : undefined,
+        documentType,
+        knownMedicines,
+        knownSuppliers
+      })
+    });
+    if (!res.ok) throw new Error(`Server returned ${res.status}`);
+    const json = await res.json();
+    if (!json?.success || !json?.data) throw new Error('Invalid server response');
+    if (onProgress) onProgress(95, 'اكتمل استخراج الوثيقة.', 3);
+    return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
+  } catch (err: any) {
+    console.warn('Document extraction failed:', err?.message || err);
+    return { success: false, error: err?.message || 'فشل استخراج الوثيقة' };
+  }
+}
 
+function clientFallbackParseDocument(fileText: string, tableData: any[] = [], fileName = '', knownMedicines: string[] = [], knownSuppliers: string[] = []) {
+  const items = mapTableDataToMedicineItems(tableData || [], fileText || '', fileName, knownMedicines, knownSuppliers);
   return {
-    detectedType: isInvoice ? 'invoice' : 'order',
+    detectedType: fileName.toLowerCase().includes('فاتورة') || fileText.includes('سعر') ? 'invoice' : 'order',
     documentTitle: fileName ? `مستند: ${fileName}` : 'مستند مشتريات',
     partyName: knownSuppliers[0] || 'صيدلية النخبة',
     documentNumber: `DOC-${Math.floor(1000 + Math.random() * 9000)}`,
     documentDate: new Date().toISOString().split('T')[0],
     totalAmount: items.reduce((sum, it) => sum + (it.totalPrice || 0), 0),
-    items: items.length > 0 ? items : [
-      {
-        itemName: 'صنف مستخرج من الوثيقة',
-        quantity: 1,
-        unit: 'علبة',
-        unitPrice: 0,
-        totalPrice: 0,
-        bonusScheme: '',
-        discountPercent: 0,
-        isUncertain: false,
-        notes: ''
-      }
-    ],
-    summary: `تم استخراج ${items.length} صنف من المستند بنجاح.`
+    items,
+    summary: `تم استخراج ${items.length} صنف محلياً.`
   };
 }
