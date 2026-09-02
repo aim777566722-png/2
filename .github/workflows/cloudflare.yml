@@ -18,22 +18,21 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
 
       - name: Install Wrangler
         run: npm install --global wrangler@4
 
-      - name: Verify Worker configuration
+      - name: Verify Worker files
         run: |
-          test -f wrangler.toml
-          test -f cloudflare-worker.ts
+          test -f cloudflare/wrangler.toml
+          test -f cloudflare/cloudflare-worker.ts
           wrangler deploy --help >/dev/null
 
       - name: Deploy Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: wrangler deploy --config wrangler.toml --keep-vars
+        run: wrangler deploy --config cloudflare/wrangler.toml
 
       - name: Verify Worker health endpoint
         run: |
