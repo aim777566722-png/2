@@ -28,7 +28,7 @@ function cors(request: Request) {
 
 async function callGemini(env: Env, payload: any) {
   const parts: any[] = [];
-  const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly, including handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. Do not invent unreadable text. Return JSON only with this shape: {"items":[{"rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Preserve uncertain values and mark them isUncertain=true. Document metadata: ${JSON.stringify({ documentType: payload.documentType, extractionMode: payload.extractionMode, fileName: payload.fileName, knownMedicines: payload.knownMedicines || [], knownSuppliers: payload.knownSuppliers || [] })}.`;
+  const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly, including handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. Do not invent unreadable text. Return JSON only with this shape: {"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Use itemName as the primary medicine/item name. Preserve uncertain values and mark them isUncertain=true. Document metadata: ${JSON.stringify({ documentType: payload.documentType, extractionMode: payload.extractionMode, fileName: payload.fileName, knownMedicines: payload.knownMedicines || [], knownSuppliers: payload.knownSuppliers || [] })}.`;
   parts.push({ text: prompt });
   if (payload.fileText) parts.push({ text: `Existing extracted text:\n${payload.fileText}` });
   if (payload.tableData) parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData)}` });
@@ -50,6 +50,16 @@ async function callGemini(env: Env, payload: any) {
   const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '{}';
   let parsed: any;
   try { parsed = JSON.parse(text); } catch { parsed = { items: [], summary: text, extractedText: text }; }
+
+  if (parsed && Array.isArray(parsed.items)) {
+    parsed.items = parsed.items.map((item: any) => ({
+      ...item,
+      itemName: String(item?.itemName || item?.matchedName || item?.rawText || '').trim(),
+      rawText: String(item?.rawText || item?.itemName || item?.matchedName || '').trim(),
+      matchedName: String(item?.matchedName || item?.itemName || item?.rawText || '').trim(),
+    }));
+  }
+
   return parsed;
 }
 
