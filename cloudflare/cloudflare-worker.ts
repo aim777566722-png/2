@@ -58,7 +58,7 @@ export default {
     const preflight = cors(request);
     if (preflight) return preflight;
     const url = new URL(request.url);
-    if (request.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'document-ai-api' });
+    if (request.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'document-ai-api', model: GEMINI_MODEL });
     if (request.method !== 'POST' || !url.pathname.startsWith('/api/parse-')) return json({ error: 'Not found' }, 404);
     if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
     try {
