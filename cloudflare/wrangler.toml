@@ -1,0 +1,6 @@
+name = "document-ai-api"
+main = "cloudflare-worker.ts"
+workers_dev = true
+compatibility_date = "2026-08-30"
+
+# Add GEMINI_API_KEY as a Cloudflare Secret. Never commit the key.
