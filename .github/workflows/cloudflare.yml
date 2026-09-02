@@ -48,11 +48,18 @@ jobs:
           set -e
           URL="https://document-ai-api.aim777566722.workers.dev/api/parse-document"
           echo "Checking Gemini parse endpoint..."
-          RESPONSE=$(curl --fail-with-body --show-error --silent --location \
+          BODY='{"documentType":"order","extractionMode":"pure_text","fileName":"smoke-test.txt","fileText":"Panadol 500mg x 2"}'
+          RESPONSE=$(curl --show-error --silent --location \
             --connect-timeout 10 --max-time 90 \
             -H "Content-Type: application/json" \
-            -d '{"documentType":"order","extractionMode":"pure_text","fileName":"smoke-test.txt","fileText":"Panadol 500mg x 2"}' \
+            -d "$BODY" \
+            -w '\nHTTP_STATUS:%{http_code}' \
             "$URL")
           echo "$RESPONSE"
-          echo "$RESPONSE" | grep -q '"success":true'
+          STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+          if [ "$STATUS" != "200" ]; then
+            echo "Gemini parse endpoint returned HTTP $STATUS"
+            exit 1
+          fi
+          printf '%s' "$RESPONSE" | grep -q '"success":true'
           echo "Gemini parse endpoint passed."
