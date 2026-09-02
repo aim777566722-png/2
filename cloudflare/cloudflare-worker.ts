@@ -2,7 +2,7 @@ export interface Env {
   GEMINI_API_KEY: string;
 }
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
