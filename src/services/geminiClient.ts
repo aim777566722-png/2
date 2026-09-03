@@ -1,3 +1,4 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Medicine, Supplier } from '../types';
 import { mapTableDataToMedicineItems } from '../utils/documentParser';
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
@@ -9,7 +10,6 @@ const MAX_IMAGE_DIMENSION = 1600;
 const IMAGE_JPEG_QUALITY = 0.82;
 
 export type ProgressCallback = (progress: number, stepText: string, stageIndex?: number) => void;
-
 type ImagePayload = { name?: string; base64: string; mimeType?: string };
 
 function startProgressPacer(onProgress?: ProgressCallback) {
@@ -41,7 +41,6 @@ function compressImageDataUrl(image: ImagePayload): Promise<ImagePayload> {
       resolve({ ...image, base64: stripDataUrl(raw), mimeType: image.mimeType || 'image/jpeg' });
       return;
     }
-
     const src = /^data:/i.test(raw) ? raw : `data:${image.mimeType || 'image/jpeg'};base64,${stripDataUrl(raw)}`;
     const img = new Image();
     let settled = false;
@@ -50,7 +49,6 @@ function compressImageDataUrl(image: ImagePayload): Promise<ImagePayload> {
       settled = true;
       resolve(value);
     };
-
     img.onload = () => {
       try {
         let width = img.naturalWidth || img.width;
@@ -95,27 +93,54 @@ async function normalizeImages(images: ImagePayload[]): Promise<ImagePayload[]> 
   return Promise.all(valid.map(compressImageDataUrl));
 }
 
+function parseNativeResponseData(data: any): any {
+  if (typeof data !== 'string') return data;
+  try { return data ? JSON.parse(data) : null; } catch { return null; }
+}
+
 async function postJson(path: string, payload: any, hasImages: boolean): Promise<any> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const url = `${API_BASE_URL}${path}`;
+  const timeout = setTimeout(() => {}, REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal: controller.signal
-    });
-    const raw = await response.text();
-    let json: any = null;
-    try { json = raw ? JSON.parse(raw) : null; } catch { json = null; }
-    if (!response.ok) {
-      const serverError = json?.error || `الخادم أعاد HTTP ${response.status}`;
+    let status: number;
+    let json: any;
+
+    if (Capacitor.isNativePlatform()) {
+      const response = await CapacitorHttp.post({
+        url,
+        headers: { 'Content-Type': 'application/json' },
+        data: payload,
+        connectTimeout: REQUEST_TIMEOUT_MS,
+        readTimeout: REQUEST_TIMEOUT_MS
+      });
+      status = Number(response.status || 0);
+      json = parseNativeResponseData(response.data);
+    } else {
+      const controller = new AbortController();
+      const abortTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+        const raw = await response.text();
+        status = response.status;
+        try { json = raw ? JSON.parse(raw) : null; } catch { json = null; }
+      } finally {
+        clearTimeout(abortTimer);
+      }
+    }
+
+    if (status < 200 || status >= 300) {
+      const serverError = json?.error || `الخادم أعاد HTTP ${status || 'غير معروف'}`;
       throw new Error(hasImages ? `فشل تحليل الصورة: ${serverError}` : serverError);
     }
     if (!json?.success || !json?.data) throw new Error('استجابة خادم الذكاء الاصطناعي غير صالحة');
     return json;
   } catch (error: any) {
-    if (error?.name === 'AbortError') {
+    if (error?.name === 'AbortError' || error?.code === 'ETIMEDOUT') {
       throw new Error(hasImages ? 'انتهت مهلة تحليل الصورة. تحقق من الاتصال ثم أعد المحاولة.' : 'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي.');
     }
     throw error instanceof Error ? error : new Error(String(error || 'فشل الاتصال بخادم الذكاء الاصطناعي'));
@@ -154,16 +179,7 @@ export async function parseDocumentClientSide(params: {
   const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
-    const payload = {
-      documentType,
-      extractionMode,
-      fileName,
-      fileText: fileText || undefined,
-      tableData: tableData?.length ? tableData : undefined,
-      images: cleanImages.length ? cleanImages : undefined,
-      knownMedicines,
-      knownSuppliers
-    };
+    const payload = { documentType, extractionMode, fileName, fileText: fileText || undefined, tableData: tableData?.length ? tableData : undefined, images: cleanImages.length ? cleanImages : undefined, knownMedicines, knownSuppliers };
     const json = await postJson('/api/parse-document', payload, cleanImages.length > 0);
     if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
     onProgress?.(92, 'مطابقة الأصناف مع القاموس الصيدلاني وتدقيق النتائج...', 3);
@@ -192,11 +208,7 @@ export async function parsePharmacyOrderClientSide(params: {
   const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
-    const json = await postJson('/api/parse-order', {
-      text,
-      images: cleanImages.length ? cleanImages : undefined,
-      knownMedicines: knownMedicines.map(m => m.name)
-    }, cleanImages.length > 0);
+    const json = await postJson('/api/parse-order', { text, images: cleanImages.length ? cleanImages : undefined, knownMedicines: knownMedicines.map(m => m.name) }, cleanImages.length > 0);
     onProgress?.(92, 'مطابقة الأصناف مع المخزون والأسعار المرجعية...', 3);
     return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
   } catch (error: any) {
@@ -220,12 +232,7 @@ export async function parsePurchaseInvoiceClientSide(params: {
   const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
-    const json = await postJson('/api/parse-invoice', {
-      text,
-      images: cleanImages.length ? cleanImages : undefined,
-      knownSuppliers: knownSuppliers.map(s => s.name),
-      knownMedicines: knownMedicines.map(m => m.name)
-    }, cleanImages.length > 0);
+    const json = await postJson('/api/parse-invoice', { text, images: cleanImages.length ? cleanImages : undefined, knownSuppliers: knownSuppliers.map(s => s.name), knownMedicines: knownMedicines.map(m => m.name) }, cleanImages.length > 0);
     if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
     onProgress?.(92, 'تدقيق الحسابات والأسعار وتواريخ الانتهاء والبونص...', 3);
     return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
