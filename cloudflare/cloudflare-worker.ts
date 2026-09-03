@@ -6,6 +6,8 @@ const GEMINI_MODEL = 'gemini-3.6-flash';
 const MAX_REFERENCE_ITEMS = 500;
 const MAX_REFERENCE_CHARS = 24000;
 const MAX_IMAGE_BASE64_CHARS = 12_000_000;
+const GEMINI_MAX_RETRIES = 3;
+const GEMINI_RETRY_DELAYS_MS = [1500, 3500, 7000];
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -82,6 +84,10 @@ function limitReferenceList(value: unknown): string[] {
   return result;
 }
 
+function isRetryableGeminiStatus(status: number) {
+  return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 async function callGemini(env: Env, payload: any) {
   const parts: any[] = [];
   const images = collectImages(payload);
@@ -98,46 +104,58 @@ async function callGemini(env: Env, payload: any) {
     parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
   }
 
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts }],
-      generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
-    }),
+  const requestBody = JSON.stringify({
+    contents: [{ role: 'user', parts }],
+    generationConfig: { temperature: 0.1, responseMimeType: 'application/json' },
   });
 
-  const data: any = await response.json();
-  if (!response.ok) throw new Error(data?.error?.message || `Gemini request failed (${response.status})`);
+  let lastError = 'Gemini request failed';
+  for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
+    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: requestBody,
+    });
 
-  const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '{}';
-  let parsed: any;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-    try {
-      parsed = JSON.parse(cleaned);
-    } catch {
-      throw new Error('Gemini returned an invalid JSON extraction result');
+    const data: any = await response.json();
+    if (response.ok) {
+      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '{}';
+      let parsed: any;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        try {
+          parsed = JSON.parse(cleaned);
+        } catch {
+          throw new Error('Gemini returned an invalid JSON extraction result');
+        }
+      }
+
+      if (!parsed || typeof parsed !== 'object') throw new Error('Gemini returned an invalid extraction result');
+      if (!Array.isArray(parsed.items)) parsed.items = [];
+
+      parsed.items = parsed.items.map((item: any) => ({
+        ...item,
+        itemName: String(item?.itemName || item?.matchedName || item?.rawText || '').trim(),
+        rawText: String(item?.rawText || item?.itemName || item?.matchedName || '').trim(),
+        matchedName: String(item?.matchedName || item?.itemName || item?.rawText || '').trim(),
+        quantity: Number.isFinite(Number(item?.quantity)) && Number(item?.quantity) > 0 ? Number(item.quantity) : 1,
+        unit: String(item?.unit || '').trim(),
+        isUncertain: Boolean(item?.isUncertain),
+        notes: String(item?.notes || '').trim(),
+      })).filter((item: any) => item.itemName || item.rawText || item.matchedName);
+
+      return parsed;
     }
+
+    lastError = data?.error?.message || `Gemini request failed (${response.status})`;
+    if (!isRetryableGeminiStatus(response.status) || attempt >= GEMINI_MAX_RETRIES) break;
+
+    await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 7000));
   }
 
-  if (!parsed || typeof parsed !== 'object') throw new Error('Gemini returned an invalid extraction result');
-  if (!Array.isArray(parsed.items)) parsed.items = [];
-
-  parsed.items = parsed.items.map((item: any) => ({
-    ...item,
-    itemName: String(item?.itemName || item?.matchedName || item?.rawText || '').trim(),
-    rawText: String(item?.rawText || item?.itemName || item?.matchedName || '').trim(),
-    matchedName: String(item?.matchedName || item?.itemName || item?.rawText || '').trim(),
-    quantity: Number.isFinite(Number(item?.quantity)) && Number(item?.quantity) > 0 ? Number(item.quantity) : 1,
-    unit: String(item?.unit || '').trim(),
-    isUncertain: Boolean(item?.isUncertain),
-    notes: String(item?.notes || '').trim(),
-  })).filter((item: any) => item.itemName || item.rawText || item.matchedName);
-
-  return parsed;
+  throw new Error(lastError);
 }
 
 export default {
