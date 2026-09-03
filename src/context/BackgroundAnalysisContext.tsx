@@ -41,9 +41,9 @@ export interface BackgroundTask {
   subtitle: string;
   filesCount: number;
   status: TaskStatus;
-  progress: number; // 0 to 100 real percentage
+  progress: number;
   currentStep: string;
-  currentStageIndex: number; // 1 to 4
+  currentStageIndex: number;
   stages: TaskStage[];
   logs: TaskLogItem[];
   startedAt: number;
@@ -53,22 +53,17 @@ export interface BackgroundTask {
   error?: string;
   targetTab: 'document-upload' | 'orders' | 'order-intake' | 'invoice-intake';
   payload: {
-    // Document Upload Data
     uploadedFiles?: any[];
     targetType?: string;
     partyName?: string;
     extractionMode?: string;
     extractedData?: any;
     autoSavedNotice?: string | null;
-
-    // Order Data
     uploadedImages?: any[];
     orderText?: string;
     parsedItems?: OrderItem[];
     pharmacyName?: string;
     orderNumber?: string;
-
-    // Invoice Data
     invoiceRawText?: string;
     invoiceSupplierId?: string;
     invoiceSupplierName?: string;
@@ -141,13 +136,11 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
   const [tasksHistory, setTasksHistory] = useState<BackgroundTask[]>([]);
   const [isBannerVisible, setIsBannerVisible] = useState(false);
 
-  // Restore task from storage on initial mount
   useEffect(() => {
     try {
       const savedTask = Storage.getActiveTask();
       if (savedTask) {
         if (savedTask.status === 'processing') {
-          // Task was interrupted by closing or restarting the app
           const recoveredTask: BackgroundTask = {
             ...savedTask,
             status: 'error',
@@ -167,12 +160,10 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     }
   }, []);
 
-  // Sync active task to persistent storage on every change
   useEffect(() => {
     Storage.saveActiveTask(activeTask);
   }, [activeTask]);
 
-  // Background Document Task Execution
   const startDocumentTask = async ({
     files,
     targetType,
@@ -213,25 +204,18 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
       logs: [initialLog],
       startedAt: Date.now(),
       targetTab: 'document-upload',
-      payload: {
-        uploadedFiles: files,
-        targetType,
-        partyName,
-        extractionMode
-      }
+      payload: { uploadedFiles: files, targetType, partyName, extractionMode }
     };
 
     setActiveTask(newTask);
     setIsBannerVisible(true);
 
-    // Asynchronous Execution in the background
     setTimeout(async () => {
       try {
         let aggregatedText = '';
         const aggregatedTable: Array<Record<string, any>> = [];
         const imagesPayload: Array<{ name: string; base64: string; mimeType: string }> = [];
 
-        // Progress helper
         const updateTaskProgress = (progress: number, stepText: string, stageIndex = 2, logType: 'info' | 'success' | 'warn' = 'info') => {
           setActiveTask(prev => {
             if (!prev || prev.id !== taskId) return prev;
@@ -245,7 +229,6 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
               },
               ...prev.logs.slice(0, 15)
             ];
-
             return {
               ...prev,
               progress: Math.min(progress, 99),
@@ -257,35 +240,23 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
           });
         };
 
-        // Step 1: Ingest & Compress (10% to 25%)
         files.forEach((fileItem, idx) => {
           const perFileProgress = Math.round(10 + ((idx + 1) / files.length) * 15);
           updateTaskProgress(perFileProgress, `جاري فحص وتجهيز الملف ${idx + 1} من ${files.length} (${fileItem.name})...`, 1);
 
           if (fileItem.extractedText) {
-            aggregatedText += `\n--- [الملف/الصفحة ${idx + 1}: ${fileItem.name}] ---\n` + fileItem.extractedText + '\n';
+            aggregatedText += `\n--- [الملف/الصفحة ${idx + 1}: ${fileItem.name}] ---\n${fileItem.extractedText}\n`;
           }
-          if (fileItem.tableData && fileItem.tableData.length > 0) {
-            aggregatedTable.push(...fileItem.tableData);
-          }
+          if (fileItem.tableData && fileItem.tableData.length > 0) aggregatedTable.push(...fileItem.tableData);
           if (fileItem.pageImages && fileItem.pageImages.length > 0) {
             fileItem.pageImages.forEach((pImg: string, pIdx: number) => {
-              imagesPayload.push({
-                name: `${fileItem.name} (صفحة ${pIdx + 1})`,
-                base64: pImg,
-                mimeType: 'image/jpeg'
-              });
+              imagesPayload.push({ name: `${fileItem.name} (صفحة ${pIdx + 1})`, base64: pImg, mimeType: 'image/jpeg' });
             });
           } else if (fileItem.base64) {
-            imagesPayload.push({
-              name: fileItem.name,
-              base64: fileItem.base64,
-              mimeType: fileItem.mimeType || 'image/jpeg'
-            });
+            imagesPayload.push({ name: fileItem.name, base64: fileItem.base64, mimeType: fileItem.mimeType || 'image/jpeg' });
           }
         });
 
-        // Step 1: Pre-parse full table rows if genuine tabular data is present
         const rawTableRows = (aggregatedTable.length > 0 || (!imagesPayload.length && aggregatedText.trim()))
           ? mapTableDataToMedicineItems(aggregatedTable.length > 0 ? aggregatedTable : undefined, aggregatedText.trim())
           : [];
@@ -308,53 +279,35 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
             images: imagesPayload.length > 0 ? imagesPayload : undefined,
             knownMedicines: knownMedicines.map(m => m.name),
             knownSuppliers: knownSuppliers.map(s => s.name),
-            onProgress: (p, msg, stage) => {
-              updateTaskProgress(p, msg, stage || 2);
-            }
+            onProgress: (p, msg, stage) => updateTaskProgress(p, msg, stage || 2)
           });
-        } catch (fetchErr) {
-          console.warn('Error calling client-side document parser:', fetchErr);
-          resJson = null;
+        } catch (fetchErr: any) {
+          const message = fetchErr?.message || 'تعذر الاتصال بخادم تحليل الصور';
+          updateTaskProgress(94, `فشل تحليل المستند: ${message}`, 2, 'warn');
+          throw fetchErr instanceof Error ? fetchErr : new Error(message);
+        }
+
+        if (!resJson || !resJson.success || !resJson.data) {
+          throw new Error('خادم الذكاء الاصطناعي لم يُرجع نتيجة صالحة للمستند.');
         }
 
         updateTaskProgress(92, 'جاري تنقية أسماء الأدوية وحساب المجاميع وتواريخ الانتهاء والبونص...', 3);
 
-        let extracted: any = null;
+        let extracted: any = resJson.data;
+        const validatedGeminiItems = Array.isArray(extracted.items)
+          ? validateAndSanitizeInvoiceItemList(extracted.items)
+          : [];
 
-        if (resJson && resJson.success && resJson.data) {
-          extracted = resJson.data;
+        const hasLargeExcelDataset = files.some(f => f.type === 'excel' || f.name.endsWith('.xlsx') || f.name.endsWith('.csv')) && fullExtractedTableRows.length > 10;
 
-          const validatedGeminiItems = Array.isArray(extracted.items)
-            ? validateAndSanitizeInvoiceItemList(extracted.items)
-            : [];
-
-          // If Excel table had large rows (e.g. 500+ rows) and Gemini had token truncation
-          const hasLargeExcelDataset = files.some(f => f.type === 'excel' || f.name.endsWith('.xlsx') || f.name.endsWith('.csv')) && fullExtractedTableRows.length > 10;
-
-          if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedGeminiItems.length) {
-            extracted.items = fullExtractedTableRows;
-            extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً بنجاح كامل بنسبة 100%`;
-          } else {
-            extracted.items = validatedGeminiItems.length > 0 ? validatedGeminiItems : fullExtractedTableRows;
-          }
-
-          if (partyName && (!extracted.partyName || extracted.partyName.trim() === '')) {
-            extracted.partyName = partyName;
-          }
+        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedGeminiItems.length) {
+          extracted.items = fullExtractedTableRows;
+          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً بنجاح كامل بنسبة 100%`;
         } else {
-          // Fallback parsing: use fullExtractedTableRows
-          const tableRows = fullExtractedTableRows.length > 0
-            ? fullExtractedTableRows
-            : validateAndSanitizeInvoiceItemList(mapTableDataToMedicineItems(aggregatedTable, aggregatedText));
-
-          extracted = {
-            partyName: partyName || (targetType === 'order' ? 'صيدلية مستخرجة' : 'مستودع أدوية'),
-            documentDate: new Date().toISOString().split('T')[0],
-            documentNumber: `DOC-${Math.floor(1000 + Math.random() * 9000)}`,
-            items: tableRows,
-            summary: `تم استخراج ${tableRows.length} صنفاً بنجاح وبصيغة صيدلانية واضحة`
-          };
+          extracted.items = validatedGeminiItems.length > 0 ? validatedGeminiItems : fullExtractedTableRows;
         }
+
+        if (partyName && (!extracted.partyName || extracted.partyName.trim() === '')) extracted.partyName = partyName;
 
         const itemsCount = extracted?.items?.length || 0;
 
@@ -380,16 +333,11 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
               },
               ...prev.logs
             ],
-            payload: {
-              ...prev.payload,
-              extractedData: extracted
-            }
+            payload: { ...prev.payload, extractedData: extracted }
           };
-
           setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]);
           return completedTask;
         });
-
         playNotificationChime();
       } catch (err: any) {
         console.error('Background document analysis error:', err);
@@ -399,7 +347,7 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
             ...prev,
             status: 'error',
             progress: 100,
-            currentStep: 'حدث خطأ أثناء المعالجة',
+            currentStep: 'فشل تحليل المستند',
             error: err?.message || 'تعذر استخراج البيانات من الملف'
           };
         });
@@ -409,15 +357,8 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     return taskId;
   };
 
-  // Background Order Parsing Task Execution
   const startOrderTask = async ({
-    orderText,
-    uploadedImages,
-    inputMode,
-    pharmacyName,
-    orderNumber,
-    knownMedicines,
-    marketPrices
+    orderText, uploadedImages, inputMode, pharmacyName, orderNumber, knownMedicines, marketPrices
   }: {
     orderText?: string;
     uploadedImages?: any[];
@@ -429,431 +370,161 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
   }): Promise<string> => {
     const taskId = `task-ord-${Date.now()}`;
     const filesCount = uploadedImages && uploadedImages.length > 0 ? uploadedImages.length : 1;
-
     const newTask: BackgroundTask = {
-      id: taskId,
-      type: 'order',
-      title: `تحليل وتفكيك طلب صيدلية (${pharmacyName || 'طلب جديد'})`,
+      id: taskId, type: 'order', title: `تحليل وتفكيك طلب صيدلية (${pharmacyName || 'طلب جديد'})`,
       subtitle: `${filesCount} ${uploadedImages && uploadedImages.length > 0 ? 'صور مرفوعة' : 'نص الطلب'}`,
-      filesCount,
-      status: 'processing',
-      progress: 15,
-      currentStep: 'جاري فحص أصناف الطلب ومطابقة الأسماء الدوائية...',
-      currentStageIndex: 1,
+      filesCount, status: 'processing', progress: 15,
+      currentStep: 'جاري فحص أصناف الطلب ومطابقة الأسماء الدوائية...', currentStageIndex: 1,
       stages: updateStagesStatus(1),
-      logs: [
-        {
-          id: `log-${Date.now()}-ord`,
-          timestamp: getLogTime(),
-          message: `بدء تفكيك وتحليل الطلب الصيدلاني`,
-          percent: 15,
-          type: 'info'
-        }
-      ],
-      startedAt: Date.now(),
-      targetTab: 'order-intake',
-      payload: {
-        orderText,
-        uploadedImages,
-        pharmacyName,
-        orderNumber
-      }
+      logs: [{ id: `log-${Date.now()}-ord`, timestamp: getLogTime(), message: 'بدء تفكيك وتحليل الطلب الصيدلاني', percent: 15, type: 'info' }],
+      startedAt: Date.now(), targetTab: 'order-intake', payload: { orderText, uploadedImages, pharmacyName, orderNumber }
     };
-
-    setActiveTask(newTask);
-    setIsBannerVisible(true);
+    setActiveTask(newTask); setIsBannerVisible(true);
 
     setTimeout(async () => {
       try {
         const rawLines = (orderText || '').split(/\r?\n/).map(l => l.trim()).filter(Boolean);
         const localParsedItems = rawLines.map(rawLine => {
           const parsed = parseMedicineOrderLine(rawLine);
-          return {
-            rawText: parsed.rawText || rawLine,
-            matchedMedicineName: parsed.name || rawLine,
-            quantity: parsed.quantity,
-            unit: parsed.unit,
-            isUncertain: parsed.isUncertain
-          };
+          return { rawText: parsed.rawText || rawLine, matchedMedicineName: parsed.name || rawLine, quantity: parsed.quantity, unit: parsed.unit, isUncertain: parsed.isUncertain };
         });
-
         const updateOrderProgress = (progress: number, stepText: string, stageIndex = 2, logType: 'info' | 'success' | 'warn' = 'info') => {
           setActiveTask(prev => {
             if (!prev || prev.id !== taskId) return prev;
-            return {
-              ...prev,
-              progress: Math.min(progress, 99),
-              currentStep: stepText,
-              currentStageIndex: stageIndex,
-              stages: updateStagesStatus(stageIndex),
-              logs: [
-                {
-                  id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  timestamp: getLogTime(),
-                  message: stepText,
-                  percent: progress,
-                  type: logType
-                },
-                ...prev.logs.slice(0, 15)
-              ]
-            };
+            return { ...prev, progress: Math.min(progress, 99), currentStep: stepText, currentStageIndex: stageIndex, stages: updateStagesStatus(stageIndex), logs: [{ id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, timestamp: getLogTime(), message: stepText, percent: progress, type: logType }, ...prev.logs.slice(0, 15)] };
           });
         };
-
         updateOrderProgress(30, 'استدعاء نموذج الذكاء الاصطناعي لفهم الخط اليدوي والأصناف...', 2);
-
         let extractedRawList: any[] = [];
-
         try {
           const imagesPayload = ((inputMode === 'camera' || inputMode === 'file') && uploadedImages && uploadedImages.length > 0)
-            ? uploadedImages.map(img => ({
-                base64: img.base64,
-                mimeType: img.mimeType,
-                name: img.name
-              }))
-            : undefined;
-
-          const json = await parsePharmacyOrderClientSide({
-            text: orderText,
-            images: imagesPayload,
-            knownMedicines,
-            onProgress: (p, msg, st) => updateOrderProgress(p, msg, st || 2)
-          });
-
+            ? uploadedImages.map(img => ({ base64: img.base64, mimeType: img.mimeType, name: img.name })) : undefined;
+          const json = await parsePharmacyOrderClientSide({ text: orderText, images: imagesPayload, knownMedicines, onProgress: (p, msg, st) => updateOrderProgress(p, msg, st || 2) });
           if (json && json.success) {
             if (Array.isArray(json.data)) extractedRawList = json.data;
             else if (json.data && Array.isArray(json.data.items)) extractedRawList = json.data.items;
             else if (Array.isArray((json as any).items)) extractedRawList = (json as any).items;
           }
         } catch (networkErr) {
+          if (uploadedImages && uploadedImages.length > 0) throw networkErr;
           console.warn('API error in background order parsing:', networkErr);
         }
-
-        // Merge coverage guarantee
         if (rawLines.length > 0) {
-          if (extractedRawList.length === 0) {
-            extractedRawList = localParsedItems;
-          } else if (extractedRawList.length < rawLines.length) {
+          if (extractedRawList.length === 0) extractedRawList = localParsedItems;
+          else if (extractedRawList.length < rawLines.length) {
             const aiRawTexts = new Set(extractedRawList.map(it => (it.rawText || '').trim().toLowerCase()));
             localParsedItems.forEach(localItem => {
               const cleanRaw = (localItem.rawText || '').trim().toLowerCase();
-              if (!aiRawTexts.has(cleanRaw)) {
-                extractedRawList.push(localItem);
-              }
+              if (!aiRawTexts.has(cleanRaw)) extractedRawList.push(localItem);
             });
           }
         }
-
         updateOrderProgress(88, 'جاري مطابقة أسعار السوق وأفضل عروض الموردين في اليمن...', 3);
-
         const parsedItems: OrderItem[] = extractedRawList.map((it: any, idx: number) => {
           let rawName = (it.matchedMedicineName || it.matchedName || it.medicineName || it.rawText || `صنف ${idx + 1}`).trim();
           let medName = cleanAndFormatMedicineName(rawName);
           let medId = it.matchedMedicineId || '';
-
           const sim = findSimilarMedicine(medName, knownMedicines);
-          if (sim && (sim.isExact || sim.similarityScore >= 0.70)) {
-            medName = sim.existingMedicine.name;
-            medId = sim.existingMedicine.id;
-          }
-
+          if (sim && (sim.isExact || sim.similarityScore >= 0.70)) { medName = sim.existingMedicine.name; medId = sim.existingMedicine.id; }
           const summary = computeMedicinePriceSummary(medId, medName, marketPrices, knownMedicines);
-
           return {
-            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,
-            rawText: cleanAndFormatMedicineName(it.rawText || rawName),
-            matchedMedicineName: medName,
-            matchedMedicineId: medId || (summary?.medicineId || undefined),
-            quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1,
-            unit: it.unit || 'علبة',
-            isUncertain: it.isUncertain || false,
-            uncertaintyReason: it.uncertaintyReason || undefined,
-            notes: it.notes || '',
-            referencePrice: summary?.lowestPrice || (Number(it.unitPrice) > 0 ? Number(it.unitPrice) : undefined),
-            bestSupplierId: summary?.bestSupplierId,
-            bestSupplierName: summary?.bestSupplierName,
-            bestMarketPrice: summary?.lowestPrice || 0
+            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`, rawText: cleanAndFormatMedicineName(it.rawText || rawName), matchedMedicineName: medName,
+            matchedMedicineId: medId || (summary?.medicineId || undefined), quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1, unit: it.unit || 'علبة',
+            isUncertain: it.isUncertain || false, uncertaintyReason: it.uncertaintyReason || undefined, notes: it.notes || '', referencePrice: summary?.lowestPrice || (Number(it.unitPrice) > 0 ? Number(it.unitPrice) : undefined),
+            bestSupplierId: summary?.bestSupplierId, bestSupplierName: summary?.bestSupplierName, bestMarketPrice: summary?.lowestPrice || 0
           };
         });
-
         const itemsCount = parsedItems.length;
-
         setActiveTask(prev => {
           if (!prev || prev.id !== taskId) return prev;
           const completedTask: BackgroundTask = {
-            ...prev,
-            status: 'completed',
-            progress: 100,
-            currentStep: `تم الانتهاء بنجاح! تم استخراج وتنسيق ${itemsCount} صنفاً`,
-            currentStageIndex: 4,
-            stages: updateStagesStatus(4, true),
-            completedAt: Date.now(),
-            itemsCount,
-            resultSummary: `تم استخراج ${itemsCount} صنفاً ومطابقة أسعارها بالسوق`,
-            logs: [
-              {
-                id: `log-${Date.now()}-done`,
-                timestamp: getLogTime(),
-                message: `تم تفكيك ${itemsCount} صنفاً ومطابقة أسعارها فورياً`,
-                percent: 100,
-                type: 'success'
-              },
-              ...prev.logs
-            ],
-            payload: {
-              ...prev.payload,
-              parsedItems
-            }
+            ...prev, status: 'completed', progress: 100, currentStep: `تم الانتهاء بنجاح! تم استخراج وتنسيق ${itemsCount} صنفاً`, currentStageIndex: 4,
+            stages: updateStagesStatus(4, true), completedAt: Date.now(), itemsCount, resultSummary: `تم استخراج ${itemsCount} صنفاً ومطابقة أسعارها بالسوق`,
+            logs: [{ id: `log-${Date.now()}-done`, timestamp: getLogTime(), message: `تم تفكيك ${itemsCount} صنفاً ومطابقة أسعارها فورياً`, percent: 100, type: 'success' }, ...prev.logs],
+            payload: { ...prev.payload, parsedItems }
           };
-
-          setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]);
-          return completedTask;
+          setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]); return completedTask;
         });
-
         playNotificationChime();
       } catch (err: any) {
         console.error('Background order analysis error:', err);
-        setActiveTask(prev => {
-          if (!prev || prev.id !== taskId) return prev;
-          return {
-            ...prev,
-            status: 'error',
-            progress: 100,
-            currentStep: 'حدث خطأ أثناء المعالجة',
-            error: err?.message || 'تعذر تفكيك واستخراج بيانات الطلب'
-          };
-        });
+        setActiveTask(prev => prev && prev.id === taskId ? { ...prev, status: 'error', progress: 100, currentStep: 'حدث خطأ أثناء المعالجة', error: err?.message || 'تعذر تفكيك واستخراج بيانات الطلب' } : prev);
       }
     }, 150);
-
     return taskId;
   };
 
-  // Background Invoice Task Execution
-  const startInvoiceTask = async ({
-    rawText,
-    uploadedImages,
-    knownSuppliers,
-    knownMedicines,
-    activeTabMode
-  }: {
-    rawText?: string;
-    uploadedImages?: any[];
-    knownSuppliers: Supplier[];
-    knownMedicines: Medicine[];
-    activeTabMode: 'image' | 'text';
+  const startInvoiceTask = async ({ rawText, uploadedImages, knownSuppliers, knownMedicines, activeTabMode }: {
+    rawText?: string; uploadedImages?: any[]; knownSuppliers: Supplier[]; knownMedicines: Medicine[]; activeTabMode: 'image' | 'text';
   }): Promise<string> => {
     const taskId = `task-inv-${Date.now()}`;
     const filesCount = uploadedImages && uploadedImages.length > 0 ? uploadedImages.length : 1;
-
     const newTask: BackgroundTask = {
-      id: taskId,
-      type: 'invoice',
-      title: 'تحليل واستخراج فاتورة شراء',
-      subtitle: `${filesCount} ${uploadedImages && uploadedImages.length > 0 ? 'صور فاتورة' : 'نص الفاتورة'}`,
-      filesCount,
-      status: 'processing',
-      progress: 15,
-      currentStep: 'جاري استخراج بيانات المورد ورقم الفاتورة والأصناف المشتراة...',
-      currentStageIndex: 1,
-      stages: updateStagesStatus(1),
-      logs: [
-        {
-          id: `log-${Date.now()}-inv`,
-          timestamp: getLogTime(),
-          message: 'بدء قراءة وتدقيق فاتورة الشراء',
-          percent: 15,
-          type: 'info'
-        }
-      ],
-      startedAt: Date.now(),
-      targetTab: 'invoice-intake',
-      payload: {
-        invoiceRawText: rawText,
-        uploadedImages
-      }
+      id: taskId, type: 'invoice', title: 'تحليل واستخراج فاتورة شراء', subtitle: `${filesCount} ${uploadedImages && uploadedImages.length > 0 ? 'صور فاتورة' : 'نص الفاتورة'}`,
+      filesCount, status: 'processing', progress: 15, currentStep: 'جاري استخراج بيانات المورد ورقم الفاتورة والأصناف المشتراة...', currentStageIndex: 1,
+      stages: updateStagesStatus(1), logs: [{ id: `log-${Date.now()}-inv`, timestamp: getLogTime(), message: 'بدء قراءة وتدقيق فاتورة الشراء', percent: 15, type: 'info' }],
+      startedAt: Date.now(), targetTab: 'invoice-intake', payload: { invoiceRawText: rawText, uploadedImages }
     };
-
-    setActiveTask(newTask);
-    setIsBannerVisible(true);
+    setActiveTask(newTask); setIsBannerVisible(true);
 
     setTimeout(async () => {
       try {
         const updateInvoiceProgress = (progress: number, stepText: string, stageIndex = 2, logType: 'info' | 'success' | 'warn' = 'info') => {
           setActiveTask(prev => {
             if (!prev || prev.id !== taskId) return prev;
-            return {
-              ...prev,
-              progress: Math.min(progress, 99),
-              currentStep: stepText,
-              currentStageIndex: stageIndex,
-              stages: updateStagesStatus(stageIndex),
-              logs: [
-                {
-                  id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-                  timestamp: getLogTime(),
-                  message: stepText,
-                  percent: progress,
-                  type: logType
-                },
-                ...prev.logs.slice(0, 15)
-              ]
-            };
+            return { ...prev, progress: Math.min(progress, 99), currentStep: stepText, currentStageIndex: stageIndex, stages: updateStagesStatus(stageIndex), logs: [{ id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, timestamp: getLogTime(), message: stepText, percent: progress, type: logType }, ...prev.logs.slice(0, 15)] };
           });
         };
-
         updateInvoiceProgress(30, 'جاري التعرف على الأسعار والكميات والبونص...', 2);
-
         let json: any = null;
         try {
-          const imagesPayload = (activeTabMode === 'image' && uploadedImages && uploadedImages.length > 0)
-            ? uploadedImages.map(img => ({
-                base64: img.base64,
-                mimeType: img.mimeType,
-                name: img.name
-              }))
-            : undefined;
-
-          json = await parsePurchaseInvoiceClientSide({
-            text: rawText,
-            images: imagesPayload,
-            knownSuppliers,
-            knownMedicines,
-            onProgress: (p, msg, st) => updateInvoiceProgress(p, msg, st || 2)
-          });
+          const imagesPayload = (activeTabMode === 'image' && uploadedImages && uploadedImages.length > 0) ? uploadedImages.map(img => ({ base64: img.base64, mimeType: img.mimeType, name: img.name })) : undefined;
+          json = await parsePurchaseInvoiceClientSide({ text: rawText, images: imagesPayload, knownSuppliers, knownMedicines, onProgress: (p, msg, st) => updateInvoiceProgress(p, msg, st || 2) });
         } catch (fetchErr) {
+          if (activeTabMode === 'image' && uploadedImages && uploadedImages.length > 0) throw fetchErr;
           console.warn('Error in client-side invoice parsing:', fetchErr);
-          json = null;
         }
-
         updateInvoiceProgress(90, 'مطابقة أسماء الأدوية والموردين والتحقق من الإجماليات...', 3);
-
-        let extractedItems: any[] = [];
-        let supplierName = '';
-        let supplierId = '';
-        let invoiceNumber = '';
-        let invoiceDate = new Date().toISOString().split('T')[0];
-        let totalAmount = 0;
-
+        let extractedItems: any[] = [], supplierName = '', supplierId = '', invoiceNumber = '', invoiceDate = new Date().toISOString().split('T')[0], totalAmount = 0;
         if (json && json.success && json.data) {
           const d = json.data;
           supplierName = d.supplierName || '';
           const matchedSup = knownSuppliers.find(s => s.name.toLowerCase().includes(supplierName.toLowerCase()) || supplierName.toLowerCase().includes(s.name.toLowerCase()));
-          if (matchedSup) {
-            supplierId = matchedSup.id;
-            supplierName = matchedSup.name;
-          }
+          if (matchedSup) { supplierId = matchedSup.id; supplierName = matchedSup.name; }
           invoiceNumber = d.invoiceNumber || `INV-${Math.floor(1000 + Math.random() * 9000)}`;
           invoiceDate = d.invoiceDate || new Date().toISOString().split('T')[0];
           totalAmount = Number(d.totalAmount) || 0;
-
-          if (Array.isArray(d.items)) {
-            extractedItems = d.items.map((it: any, idx: number) => ({
-              id: `inv-item-${Date.now()}-${idx}`,
-              itemName: cleanAndFormatMedicineName(it.itemName || it.name || `صنف ${idx + 1}`),
-              quantity: Number(it.quantity) || 1,
-              unitPrice: Number(it.unitPrice) || 0,
-              bonusScheme: it.bonusScheme || '',
-              discountPercent: Number(it.discountPercent) || 0,
-              totalPrice: Number(it.totalPrice) || ((Number(it.quantity) || 1) * (Number(it.unitPrice) || 0))
-            }));
-          }
+          if (Array.isArray(d.items)) extractedItems = d.items.map((it: any, idx: number) => ({ id: `inv-item-${Date.now()}-${idx}`, itemName: cleanAndFormatMedicineName(it.itemName || it.name || `صنف ${idx + 1}`), quantity: Number(it.quantity) || 1, unitPrice: Number(it.unitPrice) || 0, bonusScheme: it.bonusScheme || '', discountPercent: Number(it.discountPercent) || 0, totalPrice: Number(it.totalPrice) || ((Number(it.quantity) || 1) * (Number(it.unitPrice) || 0)) }));
         }
-
         const itemsCount = extractedItems.length;
-
         setActiveTask(prev => {
           if (!prev || prev.id !== taskId) return prev;
           const completedTask: BackgroundTask = {
-            ...prev,
-            status: 'completed',
-            progress: 100,
-            currentStep: `تم استخراج الفاتورة بنجاح! تم التعرف على ${itemsCount} صنفاً`,
-            currentStageIndex: 4,
-            stages: updateStagesStatus(4, true),
-            completedAt: Date.now(),
-            itemsCount,
-            resultSummary: `فاتورة ${supplierName || 'المورد'} - ${itemsCount} صنف بإجمالي ${totalAmount.toLocaleString()} ر.ي`,
-            logs: [
-              {
-                id: `log-${Date.now()}-done`,
-                timestamp: getLogTime(),
-                message: `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً من الفاتورة`,
-                percent: 100,
-                type: 'success'
-              },
-              ...prev.logs
-            ],
-            payload: {
-              ...prev.payload,
-              invoiceSupplierId: supplierId,
-              invoiceSupplierName: supplierName,
-              invoiceNumber,
-              invoiceDate,
-              invoiceItems: extractedItems,
-              invoiceTotal: totalAmount
-            }
+            ...prev, status: 'completed', progress: 100, currentStep: `تم استخراج الفاتورة بنجاح! تم التعرف على ${itemsCount} صنفاً`, currentStageIndex: 4,
+            stages: updateStagesStatus(4, true), completedAt: Date.now(), itemsCount, resultSummary: `فاتورة ${supplierName || 'المورد'} - ${itemsCount} صنف بإجمالي ${totalAmount.toLocaleString()} ر.ي`,
+            logs: [{ id: `log-${Date.now()}-done`, timestamp: getLogTime(), message: `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً من الفاتورة`, percent: 100, type: 'success' }, ...prev.logs],
+            payload: { ...prev.payload, invoiceSupplierId: supplierId, invoiceSupplierName: supplierName, invoiceNumber, invoiceDate, invoiceItems: extractedItems, invoiceTotal: totalAmount }
           };
-
-          setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]);
-          return completedTask;
+          setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]); return completedTask;
         });
-
         playNotificationChime();
       } catch (err: any) {
         console.error('Background invoice analysis error:', err);
-        setActiveTask(prev => {
-          if (!prev || prev.id !== taskId) return prev;
-          return {
-            ...prev,
-            status: 'error',
-            progress: 100,
-            currentStep: 'حدث خطأ أثناء معالجة الفاتورة',
-            error: err?.message || 'تعذر استخراج بيانات الفاتورة'
-          };
-        });
+        setActiveTask(prev => prev && prev.id === taskId ? { ...prev, status: 'error', progress: 100, currentStep: 'حدث خطأ أثناء معالجة الفاتورة', error: err?.message || 'تعذر استخراج بيانات الفاتورة' } : prev);
       }
     }, 150);
-
     return taskId;
   };
 
-  const dismissBanner = () => {
-    setIsBannerVisible(false);
-  };
-
-  const clearActiveTask = () => {
-    setActiveTask(null);
-    setIsBannerVisible(false);
-    Storage.clearActiveTask();
-  };
-
+  const dismissBanner = () => setIsBannerVisible(false);
+  const clearActiveTask = () => { setActiveTask(null); setIsBannerVisible(false); Storage.clearActiveTask(); };
   const clearTask = (taskId?: string) => {
-    if (!taskId || (activeTask && activeTask.id === taskId)) {
-      setActiveTask(null);
-      setIsBannerVisible(false);
-      Storage.clearActiveTask();
-    }
-    if (taskId) {
-      setTasksHistory(prev => prev.filter(t => t.id !== taskId));
-    }
+    if (!taskId || (activeTask && activeTask.id === taskId)) { setActiveTask(null); setIsBannerVisible(false); Storage.clearActiveTask(); }
+    if (taskId) setTasksHistory(prev => prev.filter(t => t.id !== taskId));
   };
 
   return (
-    <BackgroundAnalysisContext.Provider
-      value={{
-        activeTask,
-        tasksHistory,
-        isBannerVisible,
-        setIsBannerVisible,
-        startDocumentTask,
-        startOrderTask,
-        startInvoiceTask,
-        dismissBanner,
-        clearTask,
-        clearActiveTask
-      }}
-    >
+    <BackgroundAnalysisContext.Provider value={{ activeTask, tasksHistory, isBannerVisible, setIsBannerVisible, startDocumentTask, startOrderTask, startInvoiceTask, dismissBanner, clearTask, clearActiveTask }}>
       {children}
     </BackgroundAnalysisContext.Provider>
   );
@@ -861,8 +532,6 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
 
 export const useBackgroundAnalysis = () => {
   const context = useContext(BackgroundAnalysisContext);
-  if (!context) {
-    throw new Error('useBackgroundAnalysis must be used within BackgroundAnalysisProvider');
-  }
+  if (!context) throw new Error('useBackgroundAnalysis must be used within BackgroundAnalysisProvider');
   return context;
 };
