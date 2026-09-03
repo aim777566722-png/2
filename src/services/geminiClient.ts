@@ -17,7 +17,53 @@ function stripDataUrl(value: string): string { return value.replace(/^data:[^;]+
 function compressImageDataUrl(image: ImagePayload): Promise<ImagePayload> { return new Promise(resolve => { const raw = typeof image.base64 === 'string' ? image.base64.trim() : ''; if (!raw || typeof window === 'undefined') { resolve({ ...image, base64: stripDataUrl(raw), mimeType: image.mimeType || 'image/jpeg' }); return; } const src = /^data:/i.test(raw) ? raw : `data:${image.mimeType || 'image/jpeg'};base64,${stripDataUrl(raw)}`; const img = new Image(); let settled = false; const finish = (value: ImagePayload) => { if (settled) return; settled = true; resolve(value); }; img.onload = () => { try { let width = img.naturalWidth || img.width; let height = img.naturalHeight || img.height; if (!width || !height) { finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' }); return; } if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) { if (width >= height) { height = Math.round(height * MAX_IMAGE_DIMENSION / width); width = MAX_IMAGE_DIMENSION; } else { width = Math.round(width * MAX_IMAGE_DIMENSION / height); height = MAX_IMAGE_DIMENSION; } } const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height; const ctx = canvas.getContext('2d'); if (!ctx) { finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' }); return; } ctx.fillStyle = '#FFFFFF'; ctx.fillRect(0, 0, width, height); ctx.drawImage(img, 0, 0, width, height); finish({ ...image, base64: stripDataUrl(canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY)), mimeType: 'image/jpeg' }); } catch { finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' }); } }; img.onerror = () => finish({ ...image, base64: stripDataUrl(raw), mimeType: image.mimeType || 'image/jpeg' }); img.src = src; }); }
 async function normalizeImages(images: ImagePayload[]): Promise<ImagePayload[]> { return Promise.all((images || []).filter(img => typeof img?.base64 === 'string' && img.base64.trim()).map(compressImageDataUrl)); }
 function parseNativeResponseData(data: any): any { if (typeof data !== 'string') return data; try { return data ? JSON.parse(data) : null; } catch { return null; } }
-async function postJson(path: string, payload: any, hasImages: boolean): Promise<any> { const url = `${API_BASE_URL}${path}`; try { let status: number; let json: any; if (Capacitor.isNativePlatform()) { const response = await CapacitorHttp.post({ url, headers: { 'Content-Type': 'application/json' }, data: payload, connectTimeout: REQUEST_TIMEOUT_MS, readTimeout: REQUEST_TIMEOUT_MS }); status = Number(response.status || 0); json = parseNativeResponseData(response.data); } else { const controller = new AbortController(); const abortTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS); try { const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), signal: controller.signal }); const raw = await response.text(); status = response.status; try { json = raw ? JSON.parse(raw) : null; } catch { json = null; } } finally { clearTimeout(abortTimer); } } if (status < 200 || status >= 300) { const serverError = json?.error || `الخادم أعاد HTTP ${status || 'غير معروف'}`; throw new Error(hasImages ? `فشل تحليل الصورة: ${serverError}` : serverError); } if (!json?.success || !json?.data) throw new Error('استجابة خادم الذكاء الاصطناعي غير صالحة'); return json; } catch (error: any) { if (error?.name === 'AbortError' || error?.code === 'ETIMEDOUT') throw new Error(hasImages ? 'انتهت مهلة تحليل الصورة. تحقق من الاتصال ثم أعد المحاولة.' : 'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي.'); throw error instanceof Error ? error : new Error(String(error || 'فشل الاتصال بخادم الذكاء الاصطناعي')); } }
+function responseError(status: number, data: any): string { const parsed = parseNativeResponseData(data); if (parsed?.error) return String(parsed.error); if (typeof data === 'string' && data.trim()) { const text = data.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); if (text) return text.slice(0, 300); } return `الخادم أعاد HTTP ${status || 'غير معروف'}`; }
+
+async function postViaFetch(url: string, payload: any): Promise<{ status: number; data: any }> { const controller = new AbortController(); const abortTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS); try { const response = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload), redirect: 'follow', signal: controller.signal }); const raw = await response.text(); let data: any = null; try { data = raw ? JSON.parse(raw) : null; } catch { data = raw; } return { status: response.status, data }; } finally { clearTimeout(abortTimer); } }
+
+async function postJson(path: string, payload: any, hasImages: boolean): Promise<any> {
+  const url = `${API_BASE_URL}${path}`;
+  try {
+    let status = 0;
+    let data: any = null;
+    const isAppsScript = /^https:\/\/script\.google\.com\/macros\/s\//i.test(API_BASE_URL);
+
+    if (Capacitor.isNativePlatform()) {
+      // Google Apps Script Web Apps can redirect POST responses. Try the native client first,
+      // then fall back to WebView fetch so the request can follow Google's redirect correctly.
+      const response = await CapacitorHttp.post({
+        url,
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        data: payload,
+        connectTimeout: REQUEST_TIMEOUT_MS,
+        readTimeout: REQUEST_TIMEOUT_MS
+      });
+      status = Number(response.status || 0);
+      data = response.data;
+
+      if (isAppsScript && status === 401) {
+        const fallback = await postViaFetch(url, payload);
+        status = fallback.status;
+        data = fallback.data;
+      }
+    } else {
+      const response = await postViaFetch(url, payload);
+      status = response.status;
+      data = response.data;
+    }
+
+    const json = parseNativeResponseData(data);
+    if (status < 200 || status >= 300) {
+      throw new Error(hasImages ? `فشل تحليل الصورة: ${responseError(status, data)}` : responseError(status, data));
+    }
+    if (!json?.success || !json?.data) throw new Error('استجابة خادم الذكاء الاصطناعي غير صالحة');
+    return json;
+  } catch (error: any) {
+    if (error?.name === 'AbortError' || error?.code === 'ETIMEDOUT') throw new Error(hasImages ? 'انتهت مهلة تحليل الصورة. تحقق من الاتصال ثم أعد المحاولة.' : 'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي.');
+    throw error instanceof Error ? error : new Error(String(error || 'فشل الاتصال بخادم الذكاء الاصطناعي'));
+  }
+}
+
 function localDocumentFallback(fileText: string, tableData: any[], fileName: string, knownMedicines: string[], knownSuppliers: string[]) { const items = mapTableDataToMedicineItems(tableData || [], fileText || '', fileName, knownMedicines, knownSuppliers); return { detectedType: fileName.toLowerCase().includes('فاتورة') || fileText.includes('سعر') ? 'invoice' : 'order', documentTitle: fileName ? `مستند: ${fileName}` : 'مستند مشتريات', partyName: knownSuppliers[0] || '', documentNumber: `DOC-${Date.now().toString().slice(-6)}`, documentDate: new Date().toISOString().split('T')[0], totalAmount: items.reduce((sum: number, it: any) => sum + (it.totalPrice || 0), 0), items, summary: `تم استخراج ${items.length} صنف محلياً.` }; }
 export async function parseDocumentClientSide(params: { documentType?: 'order' | 'invoice' | 'price_list'; extractionMode?: 'standard' | 'handwritten' | 'table' | 'pure_text'; fileName?: string; fileText?: string; tableData?: any[]; images?: ImagePayload[]; knownMedicines?: string[]; knownSuppliers?: string[]; onProgress?: ProgressCallback; }) { const { documentType = 'order', extractionMode = 'standard', fileName = '', fileText = '', tableData = [], images = [], knownMedicines = [], knownSuppliers = [], onProgress } = params; onProgress?.(25, 'تجهيز مصفوفة الرؤية البصرية والقاموس الصيدلاني المرجعي...', 1); const cleanImages = await normalizeImages(images); const pacer = startProgressPacer(onProgress); try { const payload = { documentType, extractionMode, fileName, fileText: fileText || undefined, tableData: tableData?.length ? tableData : undefined, images: cleanImages.length ? cleanImages : undefined, knownMedicines, knownSuppliers }; const json = await postJson('/api/parse-document', payload, cleanImages.length > 0); if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items); onProgress?.(92, 'مطابقة الأصناف مع القاموس الصيدلاني وتدقيق النتائج...', 3); return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed }; } catch (error: any) { if (cleanImages.length > 0) { console.error('Remote image document analysis failed:', error); throw error; } onProgress?.(88, 'تعذر الاتصال بالخادم، سيتم استخدام المعالجة المحلية للنص...', 3); return { success: true, data: localDocumentFallback(fileText, tableData, fileName, knownMedicines, knownSuppliers), fallbackUsed: true }; } finally { pacer.stop(); } }
 export async function parsePharmacyOrderClientSide(params: { text?: string; images?: ImagePayload[]; knownMedicines?: Medicine[]; onProgress?: ProgressCallback; }) { const { text = '', images = [], knownMedicines = [], onProgress } = params; onProgress?.(25, 'تجهيز قائمة الأصناف والصور المرفقة للطلب...', 1); const cleanImages = await normalizeImages(images); const pacer = startProgressPacer(onProgress); try { const json = await postJson('/api/parse-order', { text, images: cleanImages.length ? cleanImages : undefined, knownMedicines: knownMedicines.map(m => m.name) }, cleanImages.length > 0); onProgress?.(92, 'مطابقة الأصناف مع المخزون والأسعار المرجعية...', 3); return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed }; } catch (error: any) { if (cleanImages.length > 0) throw error; const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean); return { success: true, data: { items: lines.map(l => ({ rawText: l, matchedName: l, quantity: 1, unit: 'علبة', isUncertain: false, notes: '' })), summary: `تم استخراج ${lines.length} صنف عبر المعالجة المباشرة` }, fallbackUsed: true }; } finally { pacer.stop(); } }
