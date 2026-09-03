@@ -22,26 +22,19 @@ jobs:
       - name: Install Wrangler
         run: npm install --global wrangler@4
 
-      - name: Check Cloudflare credentials
+      - name: Check Cloudflare token
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
           test -n "$CLOUDFLARE_API_TOKEN" || { echo "CLOUDFLARE_API_TOKEN GitHub secret is missing"; exit 1; }
-          test -n "$CLOUDFLARE_ACCOUNT_ID" || { echo "CLOUDFLARE_ACCOUNT_ID GitHub secret is missing"; exit 1; }
-          test -n "$GEMINI_API_KEY" || { echo "GEMINI_API_KEY GitHub secret is missing"; exit 1; }
 
       - name: Deploy Pages API
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
           wrangler pages project create document-ai-api --production-branch main >/dev/null 2>&1 || true
-          printf '%s' "$GEMINI_API_KEY" | wrangler pages secret put GEMINI_API_KEY --project-name document-ai-api
           wrangler pages deploy cloudflare/pages --project-name document-ai-api
 
       - name: Verify Pages health endpoint
