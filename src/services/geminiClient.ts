@@ -5,6 +5,8 @@ import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 const DEFAULT_API_BASE_URL = 'https://document-ai-api.aim777566722.workers.dev';
 const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 90000;
+const MAX_IMAGE_DIMENSION = 1600;
+const IMAGE_JPEG_QUALITY = 0.82;
 
 export type ProgressCallback = (progress: number, stepText: string, stageIndex?: number) => void;
 
@@ -28,12 +30,69 @@ function startProgressPacer(onProgress?: ProgressCallback) {
   return { stop: () => clearInterval(timer) };
 }
 
-function normalizeImages(images: ImagePayload[]): ImagePayload[] {
-  return (images || []).filter(img => typeof img?.base64 === 'string' && img.base64.trim()).map(img => ({
-    name: img.name,
-    base64: img.base64.replace(/^data:[^;]+;base64,/i, '').replace(/\s/g, ''),
-    mimeType: img.mimeType || 'image/jpeg'
-  }));
+function stripDataUrl(value: string): string {
+  return value.replace(/^data:[^;]+;base64,/i, '').replace(/\s/g, '');
+}
+
+function compressImageDataUrl(image: ImagePayload): Promise<ImagePayload> {
+  return new Promise(resolve => {
+    const raw = typeof image.base64 === 'string' ? image.base64.trim() : '';
+    if (!raw || typeof window === 'undefined') {
+      resolve({ ...image, base64: stripDataUrl(raw), mimeType: image.mimeType || 'image/jpeg' });
+      return;
+    }
+
+    const src = /^data:/i.test(raw) ? raw : `data:${image.mimeType || 'image/jpeg'};base64,${stripDataUrl(raw)}`;
+    const img = new Image();
+    let settled = false;
+    const finish = (value: ImagePayload) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+
+    img.onload = () => {
+      try {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+        if (!width || !height) {
+          finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' });
+          return;
+        }
+        if (width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION) {
+          if (width >= height) {
+            height = Math.round(height * MAX_IMAGE_DIMENSION / width);
+            width = MAX_IMAGE_DIMENSION;
+          } else {
+            width = Math.round(width * MAX_IMAGE_DIMENSION / height);
+            height = MAX_IMAGE_DIMENSION;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' });
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        const compressed = canvas.toDataURL('image/jpeg', IMAGE_JPEG_QUALITY);
+        finish({ ...image, base64: stripDataUrl(compressed), mimeType: 'image/jpeg' });
+      } catch {
+        finish({ ...image, base64: stripDataUrl(raw), mimeType: 'image/jpeg' });
+      }
+    };
+    img.onerror = () => finish({ ...image, base64: stripDataUrl(raw), mimeType: image.mimeType || 'image/jpeg' });
+    img.src = src;
+  });
+}
+
+async function normalizeImages(images: ImagePayload[]): Promise<ImagePayload[]> {
+  const valid = (images || []).filter(img => typeof img?.base64 === 'string' && img.base64.trim());
+  return Promise.all(valid.map(compressImageDataUrl));
 }
 
 async function postJson(path: string, payload: any, hasImages: boolean): Promise<any> {
@@ -92,7 +151,7 @@ export async function parseDocumentClientSide(params: {
 }) {
   const { documentType = 'order', extractionMode = 'standard', fileName = '', fileText = '', tableData = [], images = [], knownMedicines = [], knownSuppliers = [], onProgress } = params;
   onProgress?.(25, 'تجهيز مصفوفة الرؤية البصرية والقاموس الصيدلاني المرجعي...', 1);
-  const cleanImages = normalizeImages(images);
+  const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
     const payload = {
@@ -130,7 +189,7 @@ export async function parsePharmacyOrderClientSide(params: {
 }) {
   const { text = '', images = [], knownMedicines = [], onProgress } = params;
   onProgress?.(25, 'تجهيز قائمة الأصناف والصور المرفقة للطلب...', 1);
-  const cleanImages = normalizeImages(images);
+  const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
     const json = await postJson('/api/parse-order', {
@@ -158,7 +217,7 @@ export async function parsePurchaseInvoiceClientSide(params: {
 }) {
   const { text = '', images = [], knownSuppliers = [], knownMedicines = [], onProgress } = params;
   onProgress?.(25, 'تجهيز مستند الفاتورة وبيانات الموردين...', 1);
-  const cleanImages = normalizeImages(images);
+  const cleanImages = await normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
   try {
     const json = await postJson('/api/parse-invoice', {
@@ -207,7 +266,7 @@ export async function extractDocumentTextClientSide(params: {
   const { fileName = '', fileText = '', images = [], documentType = 'order', knownMedicines = [], knownSuppliers = [], onProgress } = params;
   onProgress?.(20, 'جاري إرسال الوثيقة إلى خادم الذكاء الاصطناعي...', 1);
   try {
-    const cleanImages = normalizeImages(images);
+    const cleanImages = await normalizeImages(images);
     const json = await postJson('/api/parse-document', { fileName, fileText: fileText || undefined, images: cleanImages.length ? cleanImages : undefined, documentType, knownMedicines, knownSuppliers }, cleanImages.length > 0);
     onProgress?.(95, 'اكتمل استخراج الوثيقة.', 3);
     return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
