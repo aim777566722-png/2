@@ -57,3 +57,41 @@ jobs:
           if [ "$STATUS" != "200" ]; then exit 1; fi
           printf '%s' "$RESPONSE" | grep -q '"success":true'
           echo "Gemini parse endpoint passed."
+
+  verify-live-api:
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    needs: deploy
+    steps:
+      - name: Verify live Worker health independently
+        run: |
+          set -e
+          URL="https://document-ai-api.aim777566722.workers.dev/api/health"
+          RESPONSE=$(curl --show-error --silent --location --connect-timeout 10 --max-time 30 -w '\nHTTP_STATUS:%{http_code}' "$URL")
+          echo "$RESPONSE"
+          STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+          if [ "$STATUS" != "200" ]; then exit 1; fi
+          printf '%s' "$RESPONSE" | grep -q '"ok":true'
+
+      - name: Verify live Worker Gemini parsing independently
+        run: |
+          set -e
+          URL="https://document-ai-api.aim777566722.workers.dev/api/parse-document"
+          BODY='{"documentType":"order","extractionMode":"pure_text","fileName":"live-test.txt","fileText":"Panadol 500mg x 2"}'
+          RESPONSE=$(curl --show-error --silent --location --connect-timeout 10 --max-time 120 -H "Content-Type: application/json" -d "$BODY" -w '\nHTTP_STATUS:%{http_code}' "$URL")
+          echo "$RESPONSE"
+          STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+          if [ "$STATUS" != "200" ]; then exit 1; fi
+          printf '%s' "$RESPONSE" | grep -q '"success":true'
+
+      - name: Verify Google Apps Script proxy routing
+        run: |
+          set -e
+          URL="https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjGqXGNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec?route=api%2Fparse-document"
+          BODY='{"documentType":"order","extractionMode":"pure_text","fileName":"proxy-test.txt","fileText":"Panadol 500mg x 2"}'
+          RESPONSE=$(curl --show-error --silent --location --connect-timeout 15 --max-time 150 -H "Content-Type: application/json" -d "$BODY" -w '\nHTTP_STATUS:%{http_code}' "$URL")
+          echo "$RESPONSE"
+          STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+          if [ "$STATUS" != "200" ]; then exit 1; fi
+          printf '%s' "$RESPONSE" | grep -q '"success":true'
+          echo "Apps Script proxy chain passed."
