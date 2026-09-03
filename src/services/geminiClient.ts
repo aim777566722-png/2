@@ -3,7 +3,7 @@ import { Medicine, Supplier } from '../types';
 import { mapTableDataToMedicineItems } from '../utils/documentParser';
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 
-const DEFAULT_API_BASE_URL = 'https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjqG-XNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec';
+const DEFAULT_API_BASE_URL = 'https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjGqXGNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec';
 const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
 const REQUEST_TIMEOUT_MS = 90000;
 const MAX_IMAGE_DIMENSION = 1600;
