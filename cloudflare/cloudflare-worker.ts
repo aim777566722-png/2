@@ -86,7 +86,57 @@ function limitReferenceList(value: unknown): string[] {
 }
 
 function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 409 || status === 500 || status === 502 || status === 503 || status === 504;
+  return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
+function normalizeArabicDigits(value: unknown): string {
+  return String(value ?? '')
+    .replace(/[٠-٩]/g, d => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+    .replace(/[۰-۹]/g, d => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)));
+}
+
+function toNumber(value: unknown): number {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const text = normalizeArabicDigits(value).replace(/[,،\s\$\£\€\¥]/g, '').replace(/[^0-9.\-]/g, '');
+  const number = Number(text);
+  return Number.isFinite(number) ? number : 0;
+}
+
+function firstValue(item: any, keys: string[]) {
+  for (const key of keys) {
+    const value = item?.[key];
+    if (value !== undefined && value !== null && String(value).trim() !== '') return value;
+  }
+  return '';
+}
+
+function normalizeExtractedItem(item: any) {
+  const itemName = String(firstValue(item, ['itemName', 'matchedName', 'medicineName', 'name', 'productName', 'description', 'rawText']) || '').trim();
+  const rawText = String(firstValue(item, ['rawText', 'itemName', 'description', 'name']) || itemName).trim();
+  const matchedName = String(firstValue(item, ['matchedName', 'itemName', 'medicineName', 'name']) || itemName).trim();
+  const quantityValue = firstValue(item, ['quantity', 'qty', 'count', 'amount']);
+  const unitPriceValue = firstValue(item, ['unitPrice', 'price', 'unit_price', 'sellingPrice', 'purchasePrice', 'cost', 'سعر']);
+  const totalPriceValue = firstValue(item, ['totalPrice', 'total', 'lineTotal', 'amountTotal', 'total_amount', 'الإجمالي']);
+  const bonusScheme = String(firstValue(item, ['bonusScheme', 'bonus', 'freeQuantity', 'discount', 'offer', 'promotion', 'البونص', 'الخصم']) || '').trim();
+  const discountPercentValue = firstValue(item, ['discountPercent', 'discountPercentage', 'discount_rate']);
+  const expiryDate = String(firstValue(item, ['expiryDate', 'expirationDate', 'expiry', 'تاريخ_الانتهاء']) || '').trim();
+
+  return {
+    ...item,
+    itemName,
+    rawText,
+    matchedName,
+    quantity: Math.max(1, toNumber(quantityValue) || 1),
+    unit: String(firstValue(item, ['unit', 'uom', 'unitName']) || '').trim(),
+    unitPrice: Math.max(0, toNumber(unitPriceValue)),
+    totalPrice: Math.max(0, toNumber(totalPriceValue)),
+    bonusScheme,
+    discountPercent: Math.max(0, toNumber(discountPercentValue)),
+    expiryDate,
+    isUncertain: Boolean(item?.isUncertain),
+    uncertaintyReason: String(item?.uncertaintyReason || '').trim(),
+    notes: String(item?.notes || '').trim(),
+  };
 }
 
 async function callGemini(env: Env, payload: any) {
@@ -94,11 +144,30 @@ async function callGemini(env: Env, payload: any) {
   const images = collectImages(payload);
   const knownMedicines = limitReferenceList(payload?.knownMedicines);
   const knownSuppliers = limitReferenceList(payload?.knownSuppliers);
-  const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly from the supplied document, including printed and handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. The supplied images are the primary source of truth; inspect them directly. Do not invent unreadable text. Return JSON only with this exact shape: {"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Use itemName as the primary medicine/item name. Every recognizable medicine/item line must be included in items. Preserve uncertain values and mark them isUncertain=true. If the image contains text but a field is unreadable, keep the item and leave only that field uncertain/empty rather than dropping the item. Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extractionMode: payload?.extractionMode, fileName: payload?.fileName, knownMedicines, knownSuppliers })}.`;
+  const prompt = `You are a high-accuracy pharmacy document OCR and structured extraction engine. Read Arabic and English documents directly from every supplied page/image. The primary goal is COMPLETE extraction of each recognizable line, especially prices and commercial terms.
+
+Return JSON only using this exact top-level shape:
+{"partyName":"","documentNumber":"","documentDate":"","detectedType":"","totalAmount":0,"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","unitPrice":0,"totalPrice":0,"bonusScheme":"","discountPercent":0,"expiryDate":"","isUncertain":false,"uncertaintyReason":"","notes":""}],"summary":"","extractedText":""}
+
+For EVERY recognizable item line, extract:
+- itemName: exact product/medicine name including strength when visible.
+- quantity: quantity/count, not the strength.
+- unitPrice: the UNIT/PACK PRICE printed in the price column. Never omit a visible numeric price.
+- totalPrice: line total when visible; otherwise 0.
+- bonusScheme: bonus/free quantity or commercial offer such as 10+1.
+- discountPercent: numeric discount percentage when visible.
+- expiryDate: expiry date when visible.
+- partyName: supplier/distributor/store name when visible.
+- documentNumber and documentDate when visible.
+
+IMPORTANT PRICE RULES: Inspect table columns and row alignment visually. Do not confuse medicine strength (e.g. 500 mg) with price. A numeric value in a price/سعر/قيمة/بيع/شراء column is a price. Preserve decimal prices. Arabic-Indic digits must be converted to normal numeric values. If a price is visible but uncertain, put the best read in unitPrice and set isUncertain=true with a reason. Do NOT drop an item merely because one field is unreadable. If there is no visible price, leave unitPrice=0 rather than inventing one.
+
+The supplied images are the source of truth. Existing extracted text/table data are supplementary and may have lost table layout. Use them to cross-check, not to replace visual inspection. For multi-page PDFs, inspect all supplied page images and keep rows from all pages. Never return markdown fences; return valid JSON only.
+Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extractionMode: payload?.extractionMode, fileName: payload?.fileName, knownMedicines, knownSuppliers })}.`;
   parts.push({ text: prompt });
-  if (payload?.fileText) parts.push({ text: `Existing extracted text:\n${String(payload.fileText).slice(0, 50000)}` });
+  if (payload?.fileText) parts.push({ text: `Existing extracted text for cross-checking:\n${String(payload.fileText).slice(0, 80000)}` });
   if (Array.isArray(payload?.tableData) && payload.tableData.length > 0) {
-    parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData).slice(0, 50000)}` });
+    parts.push({ text: `Existing table data for cross-checking:\n${JSON.stringify(payload.tableData).slice(0, 80000)}` });
   }
 
   for (const image of images.slice(0, 12)) {
@@ -135,9 +204,20 @@ async function callGemini(env: Env, payload: any) {
       clearTimeout(timeout);
     }
 
-    const data: any = await response.json();
+    let data: any;
+    try {
+      data = await response.json();
+    } catch {
+      data = null;
+    }
+
     if (response.ok) {
-      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || '').join('') || '{}';
+      const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => typeof p?.text === 'string' ? p.text : '').join('') || '';
+      if (!text.trim()) {
+        const blockReason = data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason || 'NO_TEXT';
+        throw new Error(`Gemini لم يُرجع نصاً منظماً (${blockReason}).`);
+      }
+
       let parsed: any;
       try {
         parsed = JSON.parse(text);
@@ -146,30 +226,38 @@ async function callGemini(env: Env, payload: any) {
         try {
           parsed = JSON.parse(cleaned);
         } catch {
-          throw new Error('Gemini returned an invalid JSON extraction result');
+          const objectStart = cleaned.indexOf('{');
+          const objectEnd = cleaned.lastIndexOf('}');
+          if (objectStart >= 0 && objectEnd > objectStart) {
+            try {
+              parsed = JSON.parse(cleaned.slice(objectStart, objectEnd + 1));
+            } catch {
+              throw new Error('Gemini returned an invalid JSON extraction result');
+            }
+          } else {
+            throw new Error('Gemini returned an invalid JSON extraction result');
+          }
         }
       }
 
       if (!parsed || typeof parsed !== 'object') throw new Error('Gemini returned an invalid extraction result');
       if (!Array.isArray(parsed.items)) parsed.items = [];
 
-      parsed.items = parsed.items.map((item: any) => ({
-        ...item,
-        itemName: String(item?.itemName || item?.matchedName || item?.rawText || '').trim(),
-        rawText: String(item?.rawText || item?.itemName || item?.matchedName || '').trim(),
-        matchedName: String(item?.matchedName || item?.itemName || item?.rawText || '').trim(),
-        quantity: Number.isFinite(Number(item?.quantity)) && Number(item?.quantity) > 0 ? Number(item.quantity) : 1,
-        unit: String(item?.unit || '').trim(),
-        isUncertain: Boolean(item?.isUncertain),
-        notes: String(item?.notes || '').trim(),
-      })).filter((item: any) => item.itemName || item.rawText || item.matchedName);
+      parsed.items = parsed.items.map(normalizeExtractedItem).filter((item: any) => item.itemName || item.rawText || item.matchedName);
+      parsed.partyName = String(parsed.partyName || parsed.supplierName || parsed.vendorName || '').trim();
+      parsed.documentNumber = String(parsed.documentNumber || parsed.invoiceNumber || '').trim();
+      parsed.documentDate = String(parsed.documentDate || parsed.invoiceDate || '').trim();
+      parsed.detectedType = String(parsed.detectedType || payload?.documentType || '').trim();
+      parsed.totalAmount = Math.max(0, toNumber(parsed.totalAmount || parsed.total || parsed.grandTotal));
+      if (!parsed.totalAmount) parsed.totalAmount = parsed.items.reduce((sum: number, item: any) => sum + (item.totalPrice || (item.unitPrice * item.quantity)), 0);
+      parsed.summary = String(parsed.summary || '').trim();
+      parsed.extractedText = String(parsed.extractedText || payload?.fileText || '').trim();
 
       return parsed;
     }
 
     lastError = data?.error?.message || `Gemini request failed (${response.status})`;
     if (!isRetryableGeminiStatus(response.status) || attempt >= GEMINI_MAX_RETRIES) break;
-
     await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 7000));
   }
 
