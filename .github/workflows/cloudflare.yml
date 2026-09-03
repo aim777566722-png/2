@@ -84,14 +84,13 @@ jobs:
           if [ "$STATUS" != "200" ]; then exit 1; fi
           printf '%s' "$RESPONSE" | grep -q '"success":true'
 
-      - name: Verify Google Apps Script proxy routing
+      - name: Verify Google Apps Script proxy routing without Gemini call
         run: |
           set -e
-          URL="https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjGqXGNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec?route=api%2Fparse-document"
-          BODY='{"documentType":"order","extractionMode":"pure_text","fileName":"proxy-test.txt","fileText":"Panadol 500mg x 2"}'
-          RESPONSE=$(curl --show-error --silent --location --connect-timeout 15 --max-time 150 -H "Content-Type: application/json" -d "$BODY" -w '\nHTTP_STATUS:%{http_code}' "$URL")
+          URL="https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjqG-XNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec?route=api%2Fhealth"
+          RESPONSE=$(curl --show-error --silent --location --connect-timeout 15 --max-time 60 -w '\nHTTP_STATUS:%{http_code}' "$URL")
           echo "$RESPONSE"
           STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
           if [ "$STATUS" != "200" ]; then exit 1; fi
-          printf '%s' "$RESPONSE" | grep -q '"success":true'
-          echo "Apps Script proxy chain passed."
+          printf '%s' "$RESPONSE" | grep -q '"ok":true'
+          echo "Apps Script proxy routing passed."
