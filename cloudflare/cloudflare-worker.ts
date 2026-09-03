@@ -8,6 +8,7 @@ const MAX_REFERENCE_CHARS = 24000;
 const MAX_IMAGE_BASE64_CHARS = 12_000_000;
 const GEMINI_MAX_RETRIES = 3;
 const GEMINI_RETRY_DELAYS_MS = [1500, 3500, 7000];
+const GEMINI_REQUEST_TIMEOUT_MS = 45000;
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -85,7 +86,7 @@ function limitReferenceList(value: unknown): string[] {
 }
 
 function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
+  return status === 408 || status === 409 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 async function callGemini(env: Env, payload: any) {
@@ -111,11 +112,28 @@ async function callGemini(env: Env, payload: any) {
 
   let lastError = 'Gemini request failed';
   for (let attempt = 0; attempt <= GEMINI_MAX_RETRIES; attempt++) {
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: requestBody,
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), GEMINI_REQUEST_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: requestBody,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        lastError = 'انتهت مهلة الاتصال بخدمة Gemini أثناء تحليل المستند. حاول مرة أخرى.';
+      } else {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      if (attempt >= GEMINI_MAX_RETRIES) break;
+      await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 7000));
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const data: any = await response.json();
     if (response.ok) {
