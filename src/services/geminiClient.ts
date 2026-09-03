@@ -1,478 +1,218 @@
-/**
- * Pharmacy AI Service - Full-Stack Client Proxy
- *
- * Proxies all Gemini AI extraction requests through server-side (/api/*) endpoints
- * where the Gemini API key is securely maintained.
- *
- * IMPORTANT: Native Android builds do not have a normal web origin, so an empty
- * API base URL would send /api/* requests to the local app instead of Cloudflare.
- * The production Cloudflare Worker is therefore the safe default. A VITE_API_BASE_URL
- * value can still override it for development or another deployment.
- */
 import { Medicine, Supplier } from '../types';
 import { mapTableDataToMedicineItems } from '../utils/documentParser';
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 
 const DEFAULT_API_BASE_URL = 'https://document-ai-api.aim777566722.workers.dev';
 const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
+const REQUEST_TIMEOUT_MS = 90000;
 
 export type ProgressCallback = (progress: number, stepText: string, stageIndex?: number) => void;
 
-/**
- * Paces real-time simulated progress ticks while waiting for server response
- */
+type ImagePayload = { name?: string; base64: string; mimeType?: string };
+
 function startProgressPacer(onProgress?: ProgressCallback) {
   if (!onProgress) return { stop: () => {} };
-
-  let currentDynamicProgress = 35;
-  const progressTimer = setInterval(() => {
-    if (currentDynamicProgress < 85) {
-      currentDynamicProgress += Math.floor(Math.random() * 4) + 3;
-      if (currentDynamicProgress > 85) currentDynamicProgress = 85;
-
-      let stepMsg = `جاري استخراج وتحليل النصوص الطبية (${currentDynamicProgress}%)...`;
-      let stage = 2;
-
-      if (currentDynamicProgress < 50) {
-        stepMsg = `تحليل بنية المستند وفحص خط اليد والجداول (${currentDynamicProgress}%)...`;
-        stage = 2;
-      } else if (currentDynamicProgress < 68) {
-        stepMsg = `استخراج أسماء الأدوية، التراكيز والكميات بدقة (${currentDynamicProgress}%)...`;
-        stage = 2;
-      } else if (currentDynamicProgress < 80) {
-        stepMsg = `تدقيق الأسعار وتواريخ الانتهاء والبونص (${currentDynamicProgress}%)...`;
-        stage = 3;
-      } else {
-        stepMsg = `تجميع مصفوفة البيانات والتدقيق الصيدلاني النهائي (${currentDynamicProgress}%)...`;
-        stage = 3;
-      }
-
-      onProgress(currentDynamicProgress, stepMsg, stage);
-    }
+  let progress = 35;
+  const timer = setInterval(() => {
+    if (progress >= 85) return;
+    progress = Math.min(85, progress + Math.floor(Math.random() * 4) + 3);
+    const message = progress < 50
+      ? `تحليل بنية المستند وفحص الصور والجداول (${progress}%)...`
+      : progress < 68
+        ? `استخراج أسماء الأدوية والتراكيز والكميات (${progress}%)...`
+        : progress < 80
+          ? `تدقيق الأسعار وتواريخ الانتهاء والبونص (${progress}%)...`
+          : `تجميع النتائج والتدقيق الصيدلاني النهائي (${progress}%)...`;
+    onProgress(progress, message, progress < 68 ? 2 : 3);
   }, 500);
+  return { stop: () => clearInterval(timer) };
+}
 
+function normalizeImages(images: ImagePayload[]): ImagePayload[] {
+  return (images || []).filter(img => typeof img?.base64 === 'string' && img.base64.trim()).map(img => ({
+    name: img.name,
+    base64: img.base64.replace(/^data:[^;]+;base64,/i, '').replace(/\s/g, ''),
+    mimeType: img.mimeType || 'image/jpeg'
+  }));
+}
+
+async function postJson(path: string, payload: any, hasImages: boolean): Promise<any> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    const raw = await response.text();
+    let json: any = null;
+    try { json = raw ? JSON.parse(raw) : null; } catch { json = null; }
+    if (!response.ok) {
+      const serverError = json?.error || `الخادم أعاد HTTP ${response.status}`;
+      throw new Error(hasImages ? `فشل تحليل الصورة: ${serverError}` : serverError);
+    }
+    if (!json?.success || !json?.data) throw new Error('استجابة خادم الذكاء الاصطناعي غير صالحة');
+    return json;
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error(hasImages ? 'انتهت مهلة تحليل الصورة. تحقق من الاتصال ثم أعد المحاولة.' : 'انتهت مهلة الاتصال بخادم الذكاء الاصطناعي.');
+    }
+    throw error instanceof Error ? error : new Error(String(error || 'فشل الاتصال بخادم الذكاء الاصطناعي'));
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function localDocumentFallback(fileText: string, tableData: any[], fileName: string, knownMedicines: string[], knownSuppliers: string[]) {
+  const items = mapTableDataToMedicineItems(tableData || [], fileText || '', fileName, knownMedicines, knownSuppliers);
   return {
-    stop: () => clearInterval(progressTimer)
+    detectedType: fileName.toLowerCase().includes('فاتورة') || fileText.includes('سعر') ? 'invoice' : 'order',
+    documentTitle: fileName ? `مستند: ${fileName}` : 'مستند مشتريات',
+    partyName: knownSuppliers[0] || '',
+    documentNumber: `DOC-${Date.now().toString().slice(-6)}`,
+    documentDate: new Date().toISOString().split('T')[0],
+    totalAmount: items.reduce((sum: number, it: any) => sum + (it.totalPrice || 0), 0),
+    items,
+    summary: `تم استخراج ${items.length} صنف محلياً.`
   };
 }
 
-/**
- * 1. Document & Table Parser via Server Endpoint (/api/parse-document)
- */
 export async function parseDocumentClientSide(params: {
   documentType?: 'order' | 'invoice' | 'price_list';
   extractionMode?: 'standard' | 'handwritten' | 'table' | 'pure_text';
   fileName?: string;
   fileText?: string;
   tableData?: any[];
-  images?: Array<{ name?: string; base64: string; mimeType?: string }>;
+  images?: ImagePayload[];
   knownMedicines?: string[];
   knownSuppliers?: string[];
   onProgress?: ProgressCallback;
 }) {
-  const {
-    documentType = 'order',
-    extractionMode = 'standard',
-    fileName = '',
-    fileText = '',
-    tableData = [],
-    images = [],
-    knownMedicines = [],
-    knownSuppliers = [],
-    onProgress
-  } = params;
-
-  if (onProgress) {
-    onProgress(25, 'تجهيز مصفوفة الرؤية البصرية والقاموس الصيدلاني المرجعي...', 1);
-  }
-
+  const { documentType = 'order', extractionMode = 'standard', fileName = '', fileText = '', tableData = [], images = [], knownMedicines = [], knownSuppliers = [], onProgress } = params;
+  onProgress?.(25, 'تجهيز مصفوفة الرؤية البصرية والقاموس الصيدلاني المرجعي...', 1);
+  const cleanImages = normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
-
   try {
     const payload = {
       documentType,
       extractionMode,
       fileName,
       fileText: fileText || undefined,
-      tableData: tableData && tableData.length > 0 ? tableData : undefined,
-      images: images && images.length > 0 ? images : undefined,
-      imagesBase64: images && images.length > 0 ? images.map(img => img.base64) : undefined,
+      tableData: tableData?.length ? tableData : undefined,
+      images: cleanImages.length ? cleanImages : undefined,
       knownMedicines,
       knownSuppliers
     };
-
-    const res = await fetch(`${API_BASE_URL}/api/parse-document`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
+    const json = await postJson('/api/parse-document', payload, cleanImages.length > 0);
+    if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
+    onProgress?.(92, 'مطابقة الأصناف مع القاموس الصيدلاني وتدقيق النتائج...', 3);
+    return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
+  } catch (error: any) {
+    if (cleanImages.length > 0) {
+      console.error('Remote image document analysis failed:', error);
+      throw error;
+    }
+    console.warn('Remote text document analysis failed, using local parser:', error?.message || error);
+    onProgress?.(88, 'تعذر الاتصال بالخادم، سيتم استخدام المعالجة المحلية للنص...', 3);
+    return { success: true, data: localDocumentFallback(fileText, tableData, fileName, knownMedicines, knownSuppliers), fallbackUsed: true };
+  } finally {
     pacer.stop();
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        if (onProgress) {
-          onProgress(92, 'مطابقة الأصناف مع القاموس الصيدلاني وتدقيق التراكيز وتواريخ الانتهاء...', 3);
-        }
-        if (json.data && Array.isArray(json.data.items)) {
-          json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
-        }
-        return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
-      }
-    }
-
-    // If server returned non-ok or no data, run local parser
-    console.warn('Server parse-document returned non-ok, using local parser');
-    if (onProgress) {
-      onProgress(88, 'جاري استخدام المعالج الذكي المحلي لاستخراج النصوص...', 3);
-    }
-    const fallback = clientFallbackParseDocument(fileText || '', tableData, fileName || '', knownMedicines, knownSuppliers);
-    return { success: true, data: fallback, fallbackUsed: true };
-  } catch (err: any) {
-    pacer.stop();
-    console.warn('Network error calling /api/parse-document, using smart fallback:', err?.message || err);
-    if (onProgress) {
-      onProgress(88, 'جاري استخدام المعالج الذكي المحلي لاستخراج النصوص...', 3);
-    }
-    const fallback = clientFallbackParseDocument(fileText || '', tableData, fileName || '', knownMedicines, knownSuppliers);
-    return { success: true, data: fallback, fallbackUsed: true };
   }
 }
 
-/**
- * 2. Pharmacy Order Parser via Server Endpoint (/api/parse-order)
- */
 export async function parsePharmacyOrderClientSide(params: {
   text?: string;
-  images?: Array<{ name?: string; base64: string; mimeType?: string }>;
+  images?: ImagePayload[];
   knownMedicines?: Medicine[];
   onProgress?: ProgressCallback;
 }) {
   const { text = '', images = [], knownMedicines = [], onProgress } = params;
-
-  if (onProgress) {
-    onProgress(25, 'تجهيز قائمة الأصناف والصور المرفقة للطلب...', 1);
-  }
-
+  onProgress?.(25, 'تجهيز قائمة الأصناف والصور المرفقة للطلب...', 1);
+  const cleanImages = normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
-
   try {
-    const payload = {
+    const json = await postJson('/api/parse-order', {
       text,
-      images: images && images.length > 0 ? images : undefined,
-      imagesBase64: images && images.length > 0 ? images.map(img => img.base64) : undefined,
+      images: cleanImages.length ? cleanImages : undefined,
       knownMedicines: knownMedicines.map(m => m.name)
-    };
-
-    const res = await fetch(`${API_BASE_URL}/api/parse-order`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
-    pacer.stop();
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        if (onProgress) {
-          onProgress(92, 'مطابقة الأصناف مع المخزون والأسعار المرجعية...', 3);
-        }
-        return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
-      }
-    }
-
+    }, cleanImages.length > 0);
+    onProgress?.(92, 'مطابقة الأصناف مع المخزون والأسعار المرجعية...', 3);
+    return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
+  } catch (error: any) {
+    if (cleanImages.length > 0) throw error;
     const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    return {
-      success: true,
-      data: {
-        items: lines.map(l => ({
-          rawText: l,
-          matchedName: l,
-          quantity: 1,
-          unit: 'علبة',
-          isUncertain: false,
-          notes: ''
-        })),
-        summary: `تم استخراج ${lines.length} صنف عبر المعالجة المباشرة`
-      },
-      fallbackUsed: true
-    };
-  } catch (err: any) {
+    return { success: true, data: { items: lines.map(l => ({ rawText: l, matchedName: l, quantity: 1, unit: 'علبة', isUncertain: false, notes: '' })), summary: `تم استخراج ${lines.length} صنف عبر المعالجة المباشرة` }, fallbackUsed: true };
+  } finally {
     pacer.stop();
-    console.warn('Network error in parse-order, using fallback:', err?.message || err);
-    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-    return {
-      success: true,
-      data: {
-        items: lines.map(l => ({
-          rawText: l,
-          matchedName: l,
-          quantity: 1,
-          unit: 'علبة',
-          isUncertain: false,
-          notes: ''
-        })),
-        summary: `تم استخراج ${lines.length} صنف عبر المعالجة المباشرة`
-      },
-      fallbackUsed: true
-    };
   }
 }
 
-/**
- * 3. Purchase Invoice Parser via Server Endpoint (/api/parse-invoice)
- */
 export async function parsePurchaseInvoiceClientSide(params: {
   text?: string;
-  images?: Array<{ name?: string; base64: string; mimeType?: string }>;
+  images?: ImagePayload[];
   knownSuppliers?: Supplier[];
   knownMedicines?: Medicine[];
   onProgress?: ProgressCallback;
 }) {
   const { text = '', images = [], knownSuppliers = [], knownMedicines = [], onProgress } = params;
-
-  if (onProgress) {
-    onProgress(25, 'تجهيز مستند الفاتورة وبيانات الموردين...', 1);
-  }
-
+  onProgress?.(25, 'تجهيز مستند الفاتورة وبيانات الموردين...', 1);
+  const cleanImages = normalizeImages(images);
   const pacer = startProgressPacer(onProgress);
-
   try {
-    const payload = {
+    const json = await postJson('/api/parse-invoice', {
       text,
-      images: images && images.length > 0 ? images : undefined,
-      imagesBase64: images && images.length > 0 ? images.map(img => img.base64) : undefined,
+      images: cleanImages.length ? cleanImages : undefined,
       knownSuppliers: knownSuppliers.map(s => s.name),
       knownMedicines: knownMedicines.map(m => m.name)
-    };
-
-    const res = await fetch(`${API_BASE_URL}/api/parse-invoice`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
-    });
-
+    }, cleanImages.length > 0);
+    if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
+    onProgress?.(92, 'تدقيق الحسابات والأسعار وتواريخ الانتهاء والبونص...', 3);
+    return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
+  } catch (error: any) {
+    if (cleanImages.length > 0) throw error;
+    return { success: true, data: { supplierName: knownSuppliers[0]?.name || '', invoiceDate: new Date().toISOString().split('T')[0], invoiceNumber: `INV-${Date.now().toString().slice(-4)}`, items: [], totalAmount: 0 }, fallbackUsed: true };
+  } finally {
     pacer.stop();
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        if (onProgress) {
-          onProgress(92, 'تدقيق الحسابات والأسعار وتواريخ الانتهاء والبونص في الفاتورة...', 3);
-        }
-        if (json.data && Array.isArray(json.data.items)) {
-          json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
-        }
-        return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
-      }
-    }
-
-    return {
-      success: true,
-      data: {
-        supplierName: knownSuppliers[0]?.name || '',
-        invoiceDate: new Date().toISOString().split('T')[0],
-        invoiceNumber: `INV-${Date.now().toString().slice(-4)}`,
-        items: [],
-        totalAmount: 0
-      },
-      fallbackUsed: true
-    };
-  } catch (err: any) {
-    pacer.stop();
-    console.warn('Network error in parse-invoice, using fallback:', err?.message || err);
-    return {
-      success: true,
-      data: {
-        supplierName: knownSuppliers[0]?.name || '',
-        invoiceDate: new Date().toISOString().split('T')[0],
-        invoiceNumber: `INV-${Date.now().toString().slice(-4)}`,
-        items: [],
-        totalAmount: 0
-      },
-      fallbackUsed: true
-    };
   }
 }
 
-/**
- * 4. AI Text Refiner & Correction Studio (/api/refine-text)
- */
-export async function refineMedicineTextClientSide(params: {
-  rawText: string;
-  targetType?: string;
-  knownMedicines?: Medicine[];
-  onProgress?: ProgressCallback;
-}) {
+export async function refineMedicineTextClientSide(params: { rawText: string; targetType?: string; knownMedicines?: Medicine[]; onProgress?: ProgressCallback }) {
   const { rawText = '', targetType = 'order', knownMedicines = [], onProgress } = params;
-
-  if (onProgress) onProgress(35, 'جاري التدقيق الصيدلاني اللغوي للنص...', 2);
-
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/refine-text`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        rawText,
-        targetType,
-        knownMedicines: knownMedicines.map(m => m.name)
-      })
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        if (onProgress) onProgress(95, 'اكتمال التدقيق الصيدلاني...', 3);
-        if (json.data && Array.isArray(json.data.items)) {
-          json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
-        }
-        return { success: true, data: json.data };
-      }
-    }
-
-    const lines = rawText.split(/\r?\n/).filter(Boolean);
-    return {
-      success: true,
-      data: {
-        cleanedText: rawText,
-        items: lines.map((l: string) => ({ itemName: l, quantity: 1, unit: 'علبة' })),
-        correctionsCount: 0,
-        summary: 'تدقيق محلي'
-      },
-      fallbackUsed: true
-    };
-  } catch (err: any) {
-    const lines = rawText.split(/\r?\n/).filter(Boolean);
-    return {
-      success: true,
-      data: {
-        cleanedText: rawText,
-        items: lines.map((l: string) => ({ itemName: l, quantity: 1, unit: 'علبة' })),
-        correctionsCount: 0,
-        summary: 'تدقيق محلي'
-      },
-      fallbackUsed: true
-    };
-  }
+  onProgress?.(35, 'جاري التدقيق الصيدلاني اللغوي للنص...', 2);
+  const json = await postJson('/api/refine-text', { rawText, targetType, knownMedicines: knownMedicines.map(m => m.name) }, false);
+  if (Array.isArray(json.data.items)) json.data.items = validateAndSanitizeInvoiceItemList(json.data.items);
+  onProgress?.(95, 'اكتمل التدقيق الصيدلاني...', 3);
+  return { success: true, data: json.data };
 }
 
-/**
- * 5. Match Order vs Invoice (/api/match-order-invoice)
- */
-export async function matchOrderWithInvoiceClientSide(params: {
-  orderItems: any[];
-  invoiceItems: any[];
-  marketPrices?: any[];
-  onProgress?: ProgressCallback;
-}) {
+export async function matchOrderWithInvoiceClientSide(params: { orderItems: any[]; invoiceItems: any[]; marketPrices?: any[]; onProgress?: ProgressCallback }) {
   const { orderItems, invoiceItems, marketPrices = [], onProgress } = params;
-
-  if (onProgress) onProgress(40, 'جاري مقارنة الأصناف والأسعار بالذكاء الاصطناعي...', 2);
-
-  try {
-    const res = await fetch(`${API_BASE_URL}/api/match-order-invoice`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        orderItems,
-        invoiceItems,
-        marketPrices
-      })
-    });
-
-    if (res.ok) {
-      const json = await res.json();
-      if (json && json.success && json.data) {
-        if (onProgress) onProgress(95, 'اكتمال تحليل الفروقات والتوصيات...', 3);
-        return { success: true, data: json.data };
-      }
-    }
-
-    return {
-      success: true,
-      data: {
-        matchedCount: 0,
-        unmatchedOrderItems: orderItems,
-        unmatchedInvoiceItems: invoiceItems,
-        differences: [],
-        recommendations: []
-      },
-      fallbackUsed: true
-    };
-  } catch (err: any) {
-    console.warn('Network error in match-order-invoice:', err?.message || err);
-    return {
-      success: true,
-      data: {
-        matchedCount: 0,
-        unmatchedOrderItems: orderItems,
-        unmatchedInvoiceItems: invoiceItems,
-        differences: [],
-        recommendations: []
-      },
-      fallbackUsed: true
-    };
-  }
+  onProgress?.(40, 'جاري مقارنة الأصناف والأسعار بالذكاء الاصطناعي...', 2);
+  const json = await postJson('/api/match-order-invoice', { orderItems, invoiceItems, marketPrices }, false);
+  onProgress?.(95, 'اكتمال تحليل الفروقات والتوصيات...', 3);
+  return { success: true, data: json.data };
 }
 
-/**
- * 6. Extract raw text from a document using the server's AI endpoint.
- */
 export async function extractDocumentTextClientSide(params: {
   fileName?: string;
   fileText?: string;
-  images?: Array<{ name?: string; base64: string; mimeType?: string }>;
+  images?: ImagePayload[];
   documentType?: 'order' | 'invoice' | 'price_list';
   knownMedicines?: string[];
   knownSuppliers?: string[];
   onProgress?: ProgressCallback;
 }) {
   const { fileName = '', fileText = '', images = [], documentType = 'order', knownMedicines = [], knownSuppliers = [], onProgress } = params;
-  if (onProgress) onProgress(20, 'جاري إرسال الوثيقة إلى خادم الذكاء الاصطناعي...', 1);
-
+  onProgress?.(20, 'جاري إرسال الوثيقة إلى خادم الذكاء الاصطناعي...', 1);
   try {
-    const res = await fetch(`${API_BASE_URL}/api/parse-document`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fileName,
-        fileText: fileText || undefined,
-        images: images && images.length > 0 ? images : undefined,
-        imagesBase64: images && images.length > 0 ? images.map(img => img.base64) : undefined,
-        documentType,
-        knownMedicines,
-        knownSuppliers
-      })
-    });
-    if (!res.ok) throw new Error(`Server returned ${res.status}`);
-    const json = await res.json();
-    if (!json?.success || !json?.data) throw new Error('Invalid server response');
-    if (onProgress) onProgress(95, 'اكتمل استخراج الوثيقة.', 3);
+    const cleanImages = normalizeImages(images);
+    const json = await postJson('/api/parse-document', { fileName, fileText: fileText || undefined, images: cleanImages.length ? cleanImages : undefined, documentType, knownMedicines, knownSuppliers }, cleanImages.length > 0);
+    onProgress?.(95, 'اكتمل استخراج الوثيقة.', 3);
     return { success: true, data: json.data, fallbackUsed: !!json.fallbackUsed };
-  } catch (err: any) {
-    console.warn('Document extraction failed:', err?.message || err);
-    return { success: false, error: err?.message || 'فشل استخراج الوثيقة' };
+  } catch (error: any) {
+    console.error('Document extraction failed:', error);
+    return { success: false, error: error?.message || 'فشل استخراج الوثيقة' };
   }
-}
-
-function clientFallbackParseDocument(fileText: string, tableData: any[] = [], fileName = '', knownMedicines: string[] = [], knownSuppliers: string[] = []) {
-  const items = mapTableDataToMedicineItems(tableData || [], fileText || '', fileName, knownMedicines, knownSuppliers);
-  return {
-    detectedType: fileName.toLowerCase().includes('فاتورة') || fileText.includes('سعر') ? 'invoice' : 'order',
-    documentTitle: fileName ? `مستند: ${fileName}` : 'مستند مشتريات',
-    partyName: knownSuppliers[0] || 'صيدلية النخبة',
-    documentNumber: `DOC-${Math.floor(1000 + Math.random() * 9000)}`,
-    documentDate: new Date().toISOString().split('T')[0],
-    totalAmount: items.reduce((sum, it) => sum + (it.totalPrice || 0), 0),
-    items,
-    summary: `تم استخراج ${items.length} صنف محلياً.`
-  };
 }
