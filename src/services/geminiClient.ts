@@ -5,7 +5,9 @@ import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 
 const DEFAULT_API_BASE_URL = 'https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjGqXGNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec';
 const API_BASE_URL = ((import.meta as any).env?.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '');
-const REQUEST_TIMEOUT_MS = 90000;
+// Vision requests can legitimately take longer than a normal API request. The Worker
+// may retry transient Gemini failures, so the client must not abort at 90 seconds.
+const REQUEST_TIMEOUT_MS = 240000;
 const MAX_IMAGE_DIMENSION = 1600;
 const IMAGE_JPEG_QUALITY = 0.82;
 
