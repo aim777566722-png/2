@@ -69,9 +69,9 @@ async function callGemini(env: Env, payload: any) {
     parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData)}` });
   }
 
-  // Avoid oversized multi-page requests while still allowing normal documents.
+  // Gemini REST API uses snake_case for inline binary data parts.
   for (const image of images.slice(0, 12)) {
-    parts.push({ inlineData: { mimeType: image.mimeType, data: image.base64 } });
+    parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
   }
 
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(env.GEMINI_API_KEY)}`, {
