@@ -3,6 +3,9 @@ export interface Env {
 }
 
 const GEMINI_MODEL = 'gemini-3.6-flash';
+const MAX_REFERENCE_ITEMS = 500;
+const MAX_REFERENCE_CHARS = 24000;
+const MAX_IMAGE_BASE64_CHARS = 12_000_000;
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -42,6 +45,9 @@ function collectImages(payload: any) {
   for (const image of images) {
     const base64 = normalizeBase64(typeof image === 'string' ? image : image?.base64);
     if (!base64) continue;
+    if (base64.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new Error('الصورة كبيرة جداً بعد الضغط. أعد اختيار الصورة من داخل التطبيق ليتم ضغطها تلقائياً.');
+    }
     result.push({
       name: typeof image === 'object' ? image?.name : undefined,
       base64,
@@ -49,12 +55,29 @@ function collectImages(payload: any) {
     });
   }
 
-  // Older clients may send only imagesBase64. Keep that path working too.
   if (result.length === 0 && Array.isArray(payload?.imagesBase64)) {
     for (const image of payload.imagesBase64) {
       const base64 = normalizeBase64(image);
-      if (base64) result.push({ base64, mimeType: 'image/jpeg' });
+      if (!base64) continue;
+      if (base64.length > MAX_IMAGE_BASE64_CHARS) {
+        throw new Error('الصورة كبيرة جداً بعد الضغط. أعد اختيار الصورة من داخل التطبيق ليتم ضغطها تلقائياً.');
+      }
+      result.push({ base64, mimeType: 'image/jpeg' });
     }
+  }
+  return result;
+}
+
+function limitReferenceList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const result: string[] = [];
+  let chars = 0;
+  for (const entry of value) {
+    const text = String(entry ?? '').trim();
+    if (!text) continue;
+    if (result.length >= MAX_REFERENCE_ITEMS || chars + text.length > MAX_REFERENCE_CHARS) break;
+    result.push(text);
+    chars += text.length;
   }
   return result;
 }
@@ -62,14 +85,15 @@ function collectImages(payload: any) {
 async function callGemini(env: Env, payload: any) {
   const parts: any[] = [];
   const images = collectImages(payload);
-  const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly from the supplied document, including printed and handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. The supplied images are the primary source of truth; inspect them directly. Do not invent unreadable text. Return JSON only with this exact shape: {"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Use itemName as the primary medicine/item name. Every recognizable medicine/item line must be included in items. Preserve uncertain values and mark them isUncertain=true. If the image contains text but a field is unreadable, keep the item and leave only that field uncertain/empty rather than dropping the item. Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extractionMode: payload?.extractionMode, fileName: payload?.fileName, knownMedicines: payload?.knownMedicines || [], knownSuppliers: payload?.knownSuppliers || [] })}.`;
+  const knownMedicines = limitReferenceList(payload?.knownMedicines);
+  const knownSuppliers = limitReferenceList(payload?.knownSuppliers);
+  const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly from the supplied document, including printed and handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. The supplied images are the primary source of truth; inspect them directly. Do not invent unreadable text. Return JSON only with this exact shape: {"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Use itemName as the primary medicine/item name. Every recognizable medicine/item line must be included in items. Preserve uncertain values and mark them isUncertain=true. If the image contains text but a field is unreadable, keep the item and leave only that field uncertain/empty rather than dropping the item. Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extractionMode: payload?.extractionMode, fileName: payload?.fileName, knownMedicines, knownSuppliers })}.`;
   parts.push({ text: prompt });
-  if (payload?.fileText) parts.push({ text: `Existing extracted text:\n${payload.fileText}` });
+  if (payload?.fileText) parts.push({ text: `Existing extracted text:\n${String(payload.fileText).slice(0, 50000)}` });
   if (Array.isArray(payload?.tableData) && payload.tableData.length > 0) {
-    parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData)}` });
+    parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData).slice(0, 50000)}` });
   }
 
-  // Gemini REST API uses snake_case for inline binary data parts.
   for (const image of images.slice(0, 12)) {
     parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
   }
