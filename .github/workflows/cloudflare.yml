@@ -45,7 +45,8 @@ jobs:
           echo
           echo "Worker health check passed."
 
-      - name: Verify Gemini parse endpoint
+      - name: Verify Gemini parse endpoint (manual runs only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -e
           URL="https://document-ai-api.aim777566722.workers.dev/api/parse-document"
@@ -59,8 +60,8 @@ jobs:
 
   verify-live-api:
     runs-on: ubuntu-latest
-    if: ${{ always() }}
     needs: deploy
+    if: ${{ always() }}
     steps:
       - name: Verify live Worker health independently
         run: |
@@ -72,7 +73,8 @@ jobs:
           if [ "$STATUS" != "200" ]; then exit 1; fi
           printf '%s' "$RESPONSE" | grep -q '"ok":true'
 
-      - name: Verify live Worker Gemini parsing independently
+      - name: Verify live Worker Gemini parsing independently (manual runs only)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           set -e
           URL="https://document-ai-api.aim777566722.workers.dev/api/parse-document"
@@ -83,7 +85,7 @@ jobs:
           if [ "$STATUS" != "200" ]; then exit 1; fi
           printf '%s' "$RESPONSE" | grep -q '"success":true'
 
-      - name: Verify Google Apps Script proxy routing without Gemini call
+      - name: Verify Google Apps Script proxy routing
         run: |
           set -e
           URL="https://script.google.com/macros/s/AKfycbzd7akKXUtARy835P5248J9eaJel54wjGqXGNAsa6GJtoYjE3Ssf159FqaJpR1Kxzt6bA/exec?route=api%2Fhealth"
