@@ -1,23 +1,25 @@
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, ReactNode, useRef } from 'react';
 import { Medicine, Supplier, MarketPriceRecord, OrderItem, PharmacyOrder, PurchaseInvoice } from '../types';
 import { Storage } from '../data/storage';
-import { 
-  cleanAndFormatMedicineName, 
-  parseMedicineOrderLine, 
-  computeMedicinePriceSummary, 
+import {
+  cleanAndFormatMedicineName,
+  parseMedicineOrderLine,
+  computeMedicinePriceSummary,
   playNotificationChime,
-  validateAndSanitizeInvoiceItemList 
+  validateAndSanitizeInvoiceItemList
 } from '../utils/helpers';
 import { findSimilarMedicine } from '../utils/similarity';
-import { 
-  parseDocumentClientSide, 
-  parsePharmacyOrderClientSide, 
-  parsePurchaseInvoiceClientSide 
+import {
+  parseDocumentClientSide,
+  parsePharmacyOrderClientSide,
+  parsePurchaseInvoiceClientSide
 } from '../services/geminiClient';
 import { mapTableDataToMedicineItems } from '../utils/documentParser';
+import { analyzeDocumentLocally } from '../services/localAnalysis';
 
 export type TaskType = 'document' | 'order' | 'invoice';
 export type TaskStatus = 'processing' | 'completed' | 'error';
+export type AnalysisMode = 'ai' | 'local';
 
 export interface TaskStage {
   id: number;
@@ -57,6 +59,7 @@ export interface BackgroundTask {
     targetType?: string;
     partyName?: string;
     extractionMode?: string;
+    analysisMode?: AnalysisMode;
     extractedData?: any;
     autoSavedNotice?: string | null;
     uploadedImages?: any[];
@@ -84,6 +87,7 @@ interface BackgroundAnalysisContextType {
     targetType: 'order' | 'invoice' | 'price_list';
     partyName?: string;
     extractionMode?: 'standard' | 'handwritten' | 'table' | 'pure_text';
+    analysisMode?: AnalysisMode;
     knownMedicines: Medicine[];
     knownSuppliers: Supplier[];
   }) => Promise<string>;
@@ -112,7 +116,7 @@ const BackgroundAnalysisContext = createContext<BackgroundAnalysisContextType | 
 
 const DEFAULT_STAGES: TaskStage[] = [
   { id: 1, label: 'تجهيز وضغط المرفقات', description: 'قراءة الملفات والصور ومعالجة الدقة', status: 'pending' },
-  { id: 2, label: 'الرؤية البصرية بالذكاء الاصطناعي', description: 'تحليل خط اليد والجداول والنصوص', status: 'pending' },
+  { id: 2, label: 'تحليل المستند', description: 'تحليل النصوص والصور والجداول', status: 'pending' },
   { id: 3, label: 'التنقيح والمطابقة الصيدلانية', description: 'تدقيق الأشكال والتراكيز والأسعار', status: 'pending' },
   { id: 4, label: 'اعتماد وهيكلة النتائج', description: 'تجهيز البيانات للمعاينة والتثبيت', status: 'pending' },
 ];
@@ -135,6 +139,26 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
   const [activeTask, setActiveTask] = useState<BackgroundTask | null>(null);
   const [tasksHistory, setTasksHistory] = useState<BackgroundTask[]>([]);
   const [isBannerVisible, setIsBannerVisible] = useState(false);
+  const [analysisModePromptVisible, setAnalysisModePromptVisible] = useState(false);
+  const analysisModeResolverRef = useRef<((mode: AnalysisMode) => void) | null>(null);
+
+  const requestAnalysisMode = (): Promise<AnalysisMode> => new Promise(resolve => {
+    analysisModeResolverRef.current = resolve;
+    setAnalysisModePromptVisible(true);
+  });
+
+  const chooseAnalysisMode = (mode: AnalysisMode) => {
+    const resolve = analysisModeResolverRef.current;
+    analysisModeResolverRef.current = null;
+    setAnalysisModePromptVisible(false);
+    resolve?.(mode);
+  };
+
+  useEffect(() => {
+    return () => {
+      analysisModeResolverRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     try {
@@ -169,6 +193,7 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     targetType,
     partyName,
     extractionMode = 'standard',
+    analysisMode: requestedAnalysisMode,
     knownMedicines,
     knownSuppliers
   }: {
@@ -176,16 +201,19 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     targetType: 'order' | 'invoice' | 'price_list';
     partyName?: string;
     extractionMode?: 'standard' | 'handwritten' | 'table' | 'pure_text';
+    analysisMode?: AnalysisMode;
     knownMedicines: Medicine[];
     knownSuppliers: Supplier[];
   }): Promise<string> => {
+    const analysisMode = requestedAnalysisMode || await requestAnalysisMode();
     const taskId = `task-doc-${Date.now()}`;
     const targetLabel = targetType === 'order' ? 'طلب صيدلية' : targetType === 'invoice' ? 'فاتورة شراء' : 'عروض أسعار';
+    const modeLabel = analysisMode === 'local' ? 'تحليل محلي' : 'تحليل بالذكاء الاصطناعي';
 
     const initialLog: TaskLogItem = {
       id: `log-${Date.now()}-0`,
       timestamp: getLogTime(),
-      message: `بدء معالجة مستند ${targetLabel} (${files.length} مرفقات)`,
+      message: `بدء ${modeLabel} لمستند ${targetLabel} (${files.length} مرفقات)`,
       percent: 10,
       type: 'info'
     };
@@ -193,18 +221,18 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     const newTask: BackgroundTask = {
       id: taskId,
       type: 'document',
-      title: `تحليل ومطابقة مستند ${targetLabel}`,
+      title: `${modeLabel} — ${targetLabel}`,
       subtitle: `${files.length} ${files.length === 1 ? 'ملف مرفوع' : 'ملفات مرفوعة'}${partyName ? ` • ${partyName}` : ''}`,
       filesCount: files.length,
       status: 'processing',
       progress: 10,
-      currentStep: 'جاري فحص وتجهيز الملفات والمصفوفات البصرية...',
+      currentStep: analysisMode === 'local' ? 'جاري تجهيز محرك التحليل المحلي...' : 'جاري فحص وتجهيز الملفات والمصفوفات البصرية...',
       currentStageIndex: 1,
       stages: updateStagesStatus(1),
       logs: [initialLog],
       startedAt: Date.now(),
       targetTab: 'document-upload',
-      payload: { uploadedFiles: files, targetType, partyName, extractionMode }
+      payload: { uploadedFiles: files, targetType, partyName, extractionMode, analysisMode }
     };
 
     setActiveTask(newTask);
@@ -258,56 +286,69 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
         });
 
         const rawTableRows = (aggregatedTable.length > 0 || (!imagesPayload.length && aggregatedText.trim()))
-          ? mapTableDataToMedicineItems(aggregatedTable.length > 0 ? aggregatedTable : undefined, aggregatedText.trim())
+          ? mapTableDataToMedicineItems(aggregatedTable.length > 0 ? aggregatedTable : undefined, aggregatedText.trim(), files.map(f => f.name).join(' + '), knownMedicines.map(m => m.name), knownSuppliers.map(s => s.name))
           : [];
         const fullExtractedTableRows = validateAndSanitizeInvoiceItemList(rawTableRows);
 
-        if (fullExtractedTableRows.length > 0) {
-          updateTaskProgress(30, `تم التعرف على جدول بيانات يحتوي على ${fullExtractedTableRows.length} صنفاً. جاري الفحص الذكي...`, 2, 'success');
-        } else {
-          updateTaskProgress(28, `تم تجهيز ${files.length} مرفقات بنجاح. جاري استدعاء محرك الذكاء الاصطناعي...`, 2, 'success');
-        }
+        let extracted: any;
 
-        let resJson: any = null;
-        try {
-          resJson = await parseDocumentClientSide({
-            documentType: targetType,
-            extractionMode,
-            fileName: files.map(f => f.name).join(' + '),
-            fileText: aggregatedText.trim() || undefined,
-            tableData: aggregatedTable.length > 0 ? aggregatedTable : undefined,
-            images: imagesPayload.length > 0 ? imagesPayload : undefined,
+        if (analysisMode === 'local') {
+          updateTaskProgress(28, 'تم تجهيز المرفقات. بدء التحليل المحلي الهجين دون إرسال البيانات إلى Gemini...', 2, 'success');
+          extracted = await analyzeDocumentLocally({
+            files,
+            targetType,
             knownMedicines: knownMedicines.map(m => m.name),
             knownSuppliers: knownSuppliers.map(s => s.name),
             onProgress: (p, msg, stage) => updateTaskProgress(p, msg, stage || 2)
           });
-        } catch (fetchErr: any) {
-          const message = fetchErr?.message || 'تعذر الاتصال بخادم تحليل الصور';
-          updateTaskProgress(94, `فشل تحليل المستند: ${message}`, 2, 'warn');
-          throw fetchErr instanceof Error ? fetchErr : new Error(message);
+        } else {
+          if (fullExtractedTableRows.length > 0) {
+            updateTaskProgress(30, `تم التعرف على جدول بيانات يحتوي على ${fullExtractedTableRows.length} صنفاً. جاري الفحص الذكي...`, 2, 'success');
+          } else {
+            updateTaskProgress(28, `تم تجهيز ${files.length} مرفقات بنجاح. جاري استدعاء محرك الذكاء الاصطناعي...`, 2, 'success');
+          }
+
+          let resJson: any = null;
+          try {
+            resJson = await parseDocumentClientSide({
+              documentType: targetType,
+              extractionMode,
+              fileName: files.map(f => f.name).join(' + '),
+              fileText: aggregatedText.trim() || undefined,
+              tableData: aggregatedTable.length > 0 ? aggregatedTable : undefined,
+              images: imagesPayload.length > 0 ? imagesPayload : undefined,
+              knownMedicines: knownMedicines.map(m => m.name),
+              knownSuppliers: knownSuppliers.map(s => s.name),
+              onProgress: (p, msg, stage) => updateTaskProgress(p, msg, stage || 2)
+            });
+          } catch (fetchErr: any) {
+            const message = fetchErr?.message || 'تعذر الاتصال بخادم تحليل الصور';
+            updateTaskProgress(94, `فشل تحليل المستند: ${message}`, 2, 'warn');
+            throw fetchErr instanceof Error ? fetchErr : new Error(message);
+          }
+
+          if (!resJson || !resJson.success || !resJson.data) {
+            throw new Error('خادم الذكاء الاصطناعي لم يُرجع نتيجة صالحة للمستند.');
+          }
+          extracted = resJson.data;
         }
 
-        if (!resJson || !resJson.success || !resJson.data) {
-          throw new Error('خادم الذكاء الاصطناعي لم يُرجع نتيجة صالحة للمستند.');
-        }
+        updateTaskProgress(92, analysisMode === 'local' ? 'جاري تنقية النصوص ومطابقة الأصناف محلياً...' : 'جاري تنقية أسماء الأدوية وحساب المجاميع وتواريخ الانتهاء والبونص...', 3);
 
-        updateTaskProgress(92, 'جاري تنقية أسماء الأدوية وحساب المجاميع وتواريخ الانتهاء والبونص...', 3);
-
-        let extracted: any = resJson.data;
-        const validatedGeminiItems = Array.isArray(extracted.items)
+        const validatedExtractedItems = Array.isArray(extracted.items)
           ? validateAndSanitizeInvoiceItemList(extracted.items)
           : [];
 
-        const hasLargeExcelDataset = files.some(f => f.type === 'excel' || f.name.endsWith('.xlsx') || f.name.endsWith('.csv')) && fullExtractedTableRows.length > 10;
+        const hasLargeExcelDataset = files.some(f => f.type === 'excel' || String(f.name || '').toLowerCase().endsWith('.xlsx') || String(f.name || '').toLowerCase().endsWith('.csv')) && fullExtractedTableRows.length > 10;
 
-        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedGeminiItems.length) {
+        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {
           extracted.items = fullExtractedTableRows;
-          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً بنجاح كامل بنسبة 100%`;
+          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;
         } else {
-          extracted.items = validatedGeminiItems.length > 0 ? validatedGeminiItems : fullExtractedTableRows;
+          extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;
         }
 
-        if (partyName && (!extracted.partyName || extracted.partyName.trim() === '')) extracted.partyName = partyName;
+        if (partyName && (!extracted.partyName || String(extracted.partyName).trim() === '')) extracted.partyName = partyName;
 
         const itemsCount = extracted?.items?.length || 0;
 
@@ -317,23 +358,23 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
             ...prev,
             status: 'completed',
             progress: 100,
-            currentStep: `اكتمل الاستخراج بنجاح! تم استخراج ${itemsCount} صنفاً`,
+            currentStep: `اكتمل ${analysisMode === 'local' ? 'التحليل المحلي' : 'التحليل بالذكاء الاصطناعي'} بنجاح! تم استخراج ${itemsCount} صنفاً`,
             currentStageIndex: 4,
             stages: updateStagesStatus(4, true),
             completedAt: Date.now(),
             itemsCount,
-            resultSummary: `تم استخراج ${itemsCount} صنفاً وجاهزة للمراجعة والتثبيت`,
+            resultSummary: `${analysisMode === 'local' ? 'تحليل محلي' : 'تحليل بالذكاء الاصطناعي'}: تم استخراج ${itemsCount} صنفاً وجاهزة للمراجعة والتثبيت`,
             logs: [
               {
                 id: `log-${Date.now()}-done`,
                 timestamp: getLogTime(),
-                message: `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً صيدلانياً بدقة 100%`,
+                message: `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً صيدلانياً`,
                 percent: 100,
                 type: 'success'
               },
               ...prev.logs
             ],
-            payload: { ...prev.payload, extractedData: extracted }
+            payload: { ...prev.payload, extractedData: extracted, analysisMode }
           };
           setTasksHistory(hist => [completedTask, ...hist.slice(0, 9)]);
           return completedTask;
@@ -428,10 +469,8 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
           if (sim && (sim.isExact || sim.similarityScore >= 0.70)) { medName = sim.existingMedicine.name; medId = sim.existingMedicine.id; }
           const summary = computeMedicinePriceSummary(medId, medName, marketPrices, knownMedicines);
           return {
-            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`, rawText: cleanAndFormatMedicineName(it.rawText || rawName), matchedMedicineName: medName,
-            matchedMedicineId: medId || (summary?.medicineId || undefined), quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1, unit: it.unit || 'علبة',
-            isUncertain: it.isUncertain || false, uncertaintyReason: it.uncertaintyReason || undefined, notes: it.notes || '', referencePrice: summary?.lowestPrice || (Number(it.unitPrice) > 0 ? Number(it.unitPrice) : undefined),
-            bestSupplierId: summary?.bestSupplierId, bestSupplierName: summary?.bestSupplierName, bestMarketPrice: summary?.lowestPrice || 0
+            id: `item-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`, rawText: cleanAndFormatMedicineName(it.rawText || rawName), matchedMedicineName: medName, matchedMedicineId: medId || (summary?.medicineId || undefined), quantity: Number(it.quantity) > 0 ? Number(it.quantity) : 1, unit: it.unit || 'علبة',
+            isUncertain: it.isUncertain || false, uncertaintyReason: it.uncertaintyReason || undefined, notes: it.notes || '', referencePrice: summary?.lowestPrice || (Number(it.unitPrice) > 0 ? Number(it.unitPrice) : undefined), bestSupplierId: summary?.bestSupplierId, bestSupplierName: summary?.bestSupplierName, bestMarketPrice: summary?.lowestPrice || 0
           };
         });
         const itemsCount = parsedItems.length;
@@ -526,6 +565,28 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
   return (
     <BackgroundAnalysisContext.Provider value={{ activeTask, tasksHistory, isBannerVisible, setIsBannerVisible, startDocumentTask, startOrderTask, startInvoiceTask, dismissBanner, clearTask, clearActiveTask }}>
       {children}
+      {analysisModePromptVisible && (
+        <div dir="rtl" role="dialog" aria-modal="true" aria-labelledby="analysis-mode-title" style={{ position: 'fixed', inset: 0, zIndex: 99999, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20, background: 'rgba(2, 8, 23, 0.72)', backdropFilter: 'blur(6px)' }}>
+          <div style={{ width: 'min(560px, 100%)', borderRadius: 24, padding: 24, background: '#ffffff', boxShadow: '0 24px 80px rgba(0,0,0,.35)' }}>
+            <div style={{ textAlign: 'center', marginBottom: 22 }}>
+              <div style={{ fontSize: 30, marginBottom: 8 }}>اختر طريقة التحليل</div>
+              <div id="analysis-mode-title" style={{ fontSize: 15, color: '#475569', lineHeight: 1.7 }}>سيتم تحليل الملف أو الصورة بالطريقة التي تختارها الآن.</div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+              <button type="button" onClick={() => chooseAnalysisMode('ai')} style={{ cursor: 'pointer', border: '1px solid #cbd5e1', borderRadius: 18, padding: 20, background: '#f8fafc', textAlign: 'right' }}>
+                <div style={{ fontSize: 19, fontWeight: 800, color: '#0f172a', marginBottom: 7 }}>تحليل بالذكاء الاصطناعي</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: '#64748b' }}>تحليل بصري متقدم عبر Gemini، مناسب للمستندات المعقدة والخط اليدوي.</div>
+                <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: '#2563eb' }}>Gemini 3.6 Flash</div>
+              </button>
+              <button type="button" onClick={() => chooseAnalysisMode('local')} style={{ cursor: 'pointer', border: '1px solid #cbd5e1', borderRadius: 18, padding: 20, background: '#f8fafc', textAlign: 'right' }}>
+                <div style={{ fontSize: 19, fontWeight: 800, color: '#0f172a', marginBottom: 7 }}>تحليل محلي</div>
+                <div style={{ fontSize: 13, lineHeight: 1.7, color: '#64748b' }}>تحليل داخل الجهاز للنصوص والجداول والصور وPDF باستخدام المحرك المحلي، دون Gemini.</div>
+                <div style={{ marginTop: 12, fontSize: 12, fontWeight: 700, color: '#059669' }}>بدون استهلاك حصة Gemini</div>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </BackgroundAnalysisContext.Provider>
   );
 };
