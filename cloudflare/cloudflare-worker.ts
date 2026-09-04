@@ -2,13 +2,13 @@ export interface Env {
   GEMINI_API_KEY: string;
 }
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 const MAX_REFERENCE_ITEMS = 500;
 const MAX_REFERENCE_CHARS = 24000;
 const MAX_IMAGE_BASE64_CHARS = 12_000_000;
-const GEMINI_MAX_RETRIES = 3;
-const GEMINI_RETRY_DELAYS_MS = [1500, 3500, 7000];
-const GEMINI_REQUEST_TIMEOUT_MS = 45000;
+const GEMINI_MAX_RETRIES = 2;
+const GEMINI_RETRY_DELAYS_MS = [1500, 3500];
+const GEMINI_REQUEST_TIMEOUT_MS = 60000;
 
 function json(data: unknown, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -57,7 +57,6 @@ function collectImages(payload: any) {
       mimeType: normalizeMimeType(typeof image === 'string' ? 'image/jpeg' : image?.mimeType),
     });
   }
-
   if (result.length === 0 && Array.isArray(payload?.imagesBase64)) {
     for (const image of payload.imagesBase64) {
       const base64 = normalizeBase64(image);
@@ -83,10 +82,6 @@ function limitReferenceList(value: unknown): string[] {
     chars += text.length;
   }
   return result;
-}
-
-function isRetryableGeminiStatus(status: number) {
-  return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 function normalizeArabicDigits(value: unknown): string {
@@ -117,10 +112,9 @@ function normalizeExtractedItem(item: any) {
   const quantityValue = firstValue(item, ['quantity', 'qty', 'count', 'amount']);
   const unitPriceValue = firstValue(item, ['unitPrice', 'price', 'unit_price', 'sellingPrice', 'purchasePrice', 'cost', 'سعر']);
   const totalPriceValue = firstValue(item, ['totalPrice', 'total', 'lineTotal', 'amountTotal', 'total_amount', 'الإجمالي']);
-  const bonusScheme = String(firstValue(item, ['bonusScheme', 'bonus', 'freeQuantity', 'discount', 'offer', 'promotion', 'البونص', 'الخصم']) || '').trim();
+  const bonusScheme = String(firstValue(item, ['bonusScheme', 'bonus', 'freeQuantity', 'offer', 'promotion', 'البونص', 'الخصم']) || '').trim();
   const discountPercentValue = firstValue(item, ['discountPercent', 'discountPercentage', 'discount_rate']);
   const expiryDate = String(firstValue(item, ['expiryDate', 'expirationDate', 'expiry', 'تاريخ_الانتهاء']) || '').trim();
-
   return {
     ...item,
     itemName,
@@ -139,40 +133,28 @@ function normalizeExtractedItem(item: any) {
   };
 }
 
+function isRetryableGeminiStatus(status: number) {
+  return status === 408 || status === 409 || status === 500 || status === 502 || status === 503 || status === 504;
+}
+
 async function callGemini(env: Env, payload: any) {
   const parts: any[] = [];
   const images = collectImages(payload);
   const knownMedicines = limitReferenceList(payload?.knownMedicines);
   const knownSuppliers = limitReferenceList(payload?.knownSuppliers);
-  const prompt = `You are a high-accuracy pharmacy document OCR and structured extraction engine. Read Arabic and English documents directly from every supplied page/image. The primary goal is COMPLETE extraction of each recognizable line, especially prices and commercial terms.
+  const prompt = `You are a high-accuracy pharmacy document OCR and structured extraction engine. Read Arabic and English documents directly from every supplied page/image. The primary goal is COMPLETE extraction of every recognizable line, especially prices and commercial terms.
 
 Return JSON only using this exact top-level shape:
 {"partyName":"","documentNumber":"","documentDate":"","detectedType":"","totalAmount":0,"items":[{"itemName":"","rawText":"","matchedName":"","quantity":1,"unit":"","unitPrice":0,"totalPrice":0,"bonusScheme":"","discountPercent":0,"expiryDate":"","isUncertain":false,"uncertaintyReason":"","notes":""}],"summary":"","extractedText":""}
 
-For EVERY recognizable item line, extract:
-- itemName: exact product/medicine name including strength when visible.
-- quantity: quantity/count, not the strength.
-- unitPrice: the UNIT/PACK PRICE printed in the price column. Never omit a visible numeric price.
-- totalPrice: line total when visible; otherwise 0.
-- bonusScheme: bonus/free quantity or commercial offer such as 10+1.
-- discountPercent: numeric discount percentage when visible.
-- expiryDate: expiry date when visible.
-- partyName: supplier/distributor/store name when visible.
-- documentNumber and documentDate when visible.
+For EVERY recognizable item line, extract itemName, quantity, unit, unitPrice, totalPrice, bonusScheme, discountPercent, expiryDate and uncertainty information when applicable. Inspect table columns and row alignment visually. The numeric value under the price/سعر column is the unit price; the numeric value under value/القيمة is the line total. Do not confuse medicine strength with price. Preserve decimal prices and convert Arabic-Indic digits to normal numbers. If a visible price is uncertain, give the best read and set isUncertain=true. Never drop an item because one field is unreadable. If a price truly is not visible, use 0 rather than inventing it.
 
-IMPORTANT PRICE RULES: Inspect table columns and row alignment visually. Do not confuse medicine strength (e.g. 500 mg) with price. A numeric value in a price/سعر/قيمة/بيع/شراء column is a price. Preserve decimal prices. Arabic-Indic digits must be converted to normal numeric values. If a price is visible but uncertain, put the best read in unitPrice and set isUncertain=true with a reason. Do NOT drop an item merely because one field is unreadable. If there is no visible price, leave unitPrice=0 rather than inventing one.
-
-The supplied images are the source of truth. Existing extracted text/table data are supplementary and may have lost table layout. Use them to cross-check, not to replace visual inspection. For multi-page PDFs, inspect all supplied page images and keep rows from all pages. Never return markdown fences; return valid JSON only.
+The supplied images are the source of truth. Existing OCR text/table data are supplementary and may have lost layout. Use them only for cross-checking. Inspect all supplied pages/images. Return valid JSON only, with no markdown fences.
 Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extractionMode: payload?.extractionMode, fileName: payload?.fileName, knownMedicines, knownSuppliers })}.`;
   parts.push({ text: prompt });
   if (payload?.fileText) parts.push({ text: `Existing extracted text for cross-checking:\n${String(payload.fileText).slice(0, 80000)}` });
-  if (Array.isArray(payload?.tableData) && payload.tableData.length > 0) {
-    parts.push({ text: `Existing table data for cross-checking:\n${JSON.stringify(payload.tableData).slice(0, 80000)}` });
-  }
-
-  for (const image of images.slice(0, 12)) {
-    parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
-  }
+  if (Array.isArray(payload?.tableData) && payload.tableData.length > 0) parts.push({ text: `Existing table data for cross-checking:\n${JSON.stringify(payload.tableData).slice(0, 80000)}` });
+  for (const image of images.slice(0, 12)) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
 
   const requestBody = JSON.stringify({
     contents: [{ role: 'user', parts }],
@@ -192,75 +174,60 @@ Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extra
         signal: controller.signal,
       });
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        lastError = 'انتهت مهلة الاتصال بخدمة Gemini أثناء تحليل المستند. حاول مرة أخرى.';
-      } else {
-        lastError = error instanceof Error ? error.message : String(error);
-      }
+      lastError = error instanceof Error && error.name === 'AbortError'
+        ? 'انتهت مهلة الاتصال بخدمة Gemini أثناء تحليل المستند.'
+        : error instanceof Error ? error.message : String(error);
       if (attempt >= GEMINI_MAX_RETRIES) break;
-      await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 7000));
+      await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 3500));
       continue;
     } finally {
       clearTimeout(timeout);
     }
 
     let data: any;
-    try {
-      data = await response.json();
-    } catch {
-      data = null;
-    }
+    try { data = await response.json(); } catch { data = null; }
 
     if (response.ok) {
       const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => typeof p?.text === 'string' ? p.text : '').join('') || '';
       if (!text.trim()) {
-        const blockReason = data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason || 'NO_TEXT';
-        throw new Error(`Gemini لم يُرجع نصاً منظماً (${blockReason}).`);
+        const reason = data?.promptFeedback?.blockReason || data?.candidates?.[0]?.finishReason || 'NO_TEXT';
+        throw new Error(`Gemini لم يُرجع نتيجة منظمة (${reason}).`);
       }
-
       let parsed: any;
       try {
         parsed = JSON.parse(text);
       } catch {
         const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-        try {
-          parsed = JSON.parse(cleaned);
-        } catch {
-          const objectStart = cleaned.indexOf('{');
-          const objectEnd = cleaned.lastIndexOf('}');
-          if (objectStart >= 0 && objectEnd > objectStart) {
-            try {
-              parsed = JSON.parse(cleaned.slice(objectStart, objectEnd + 1));
-            } catch {
-              throw new Error('Gemini returned an invalid JSON extraction result');
-            }
-          } else {
-            throw new Error('Gemini returned an invalid JSON extraction result');
-          }
+        try { parsed = JSON.parse(cleaned); }
+        catch {
+          const start = cleaned.indexOf('{');
+          const end = cleaned.lastIndexOf('}');
+          if (start >= 0 && end > start) parsed = JSON.parse(cleaned.slice(start, end + 1));
+          else throw new Error('Gemini returned an invalid JSON extraction result');
         }
       }
-
       if (!parsed || typeof parsed !== 'object') throw new Error('Gemini returned an invalid extraction result');
       if (!Array.isArray(parsed.items)) parsed.items = [];
-
       parsed.items = parsed.items.map(normalizeExtractedItem).filter((item: any) => item.itemName || item.rawText || item.matchedName);
       parsed.partyName = String(parsed.partyName || parsed.supplierName || parsed.vendorName || '').trim();
       parsed.documentNumber = String(parsed.documentNumber || parsed.invoiceNumber || '').trim();
       parsed.documentDate = String(parsed.documentDate || parsed.invoiceDate || '').trim();
       parsed.detectedType = String(parsed.detectedType || payload?.documentType || '').trim();
       parsed.totalAmount = Math.max(0, toNumber(parsed.totalAmount || parsed.total || parsed.grandTotal));
-      if (!parsed.totalAmount) parsed.totalAmount = parsed.items.reduce((sum: number, item: any) => sum + (item.totalPrice || (item.unitPrice * item.quantity)), 0);
+      if (!parsed.totalAmount) parsed.totalAmount = parsed.items.reduce((sum: number, item: any) => sum + (item.totalPrice || item.unitPrice * item.quantity), 0);
       parsed.summary = String(parsed.summary || '').trim();
       parsed.extractedText = String(parsed.extractedText || payload?.fileText || '').trim();
-
       return parsed;
     }
 
-    lastError = data?.error?.message || `Gemini request failed (${response.status})`;
+    const upstreamMessage = data?.error?.message || '';
+    if (response.status === 429) {
+      throw new Error(`Gemini رفض الطلب بسبب حد الاستخدام أو الحصة (HTTP 429). ${upstreamMessage}`.trim());
+    }
+    lastError = upstreamMessage || `Gemini request failed (${response.status})`;
     if (!isRetryableGeminiStatus(response.status) || attempt >= GEMINI_MAX_RETRIES) break;
-    await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 7000));
+    await new Promise(resolve => setTimeout(resolve, GEMINI_RETRY_DELAYS_MS[attempt] ?? 3500));
   }
-
   throw new Error(lastError);
 }
 
@@ -269,12 +236,9 @@ export default {
     const preflight = cors(request);
     if (preflight) return preflight;
     const url = new URL(request.url);
-    if (request.method === 'GET' && url.pathname === '/api/health') {
-      return json({ ok: true, service: 'document-ai-api', model: GEMINI_MODEL });
-    }
+    if (request.method === 'GET' && url.pathname === '/api/health') return json({ ok: true, service: 'document-ai-api', model: GEMINI_MODEL });
     if (request.method !== 'POST' || !url.pathname.startsWith('/api/parse-')) return json({ error: 'Not found' }, 404);
-    if (!env.GEMINI_API_KEY) return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
-
+    if (!env.GEMINI_API_KEY) return json({ success: false, error: 'GEMINI_API_KEY is not configured' }, 500);
     try {
       const payload = await request.json();
       const data = await callGemini(env, payload);
