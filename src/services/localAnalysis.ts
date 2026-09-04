@@ -284,7 +284,7 @@ export async function analyzeDocumentLocally(params: {
 
   const combinedText = [text.trim(), ...ocrChunks].filter(Boolean).join('\n\n').trim();
   const heuristicRows = detectItemRows(combinedText);
-  const allTableRows = tables.flatMap(rowCells);
+  const allTableRows = tables.map(rowCells).filter(row => row.length > 0);
   const candidateRows = dedupeRows([...allTableRows, ...heuristicRows]);
 
   const mapped = mapTableDataToMedicineItems(
