@@ -58,6 +58,11 @@ function parseNumber(value: any): number {
   return Number.isFinite(result) ? result : 0;
 }
 
+function isNumericToken(value: string): boolean {
+  const normalized = normalizeDigits(value).trim().replace(/[٬،]/g, ',');
+  return /^-?(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[.]\d+)?$/.test(normalized) && /\d/.test(normalized);
+}
+
 function looksLikeDate(value: string): boolean {
   const s = normalizeDigits(value).trim();
   if (!s) return false;
@@ -147,29 +152,58 @@ function extractMetadata(text: string, fileNames: string[], knownSuppliers: stri
 function rowCells(value: any): string[] {
   if (Array.isArray(value)) return value.map(v => normalizeText(String(v ?? ''))).filter(Boolean);
   if (value && typeof value === 'object') return Object.values(value).map(v => normalizeText(String(v ?? ''))).filter(Boolean);
-  const line = normalizeText(String(value ?? ''));
-  if (!line) return [];
-  return line.split(/\t+|\s{3,}|\|+/).map(normalizeText).filter(Boolean);
+  const raw = String(value ?? '').replace(/\r/g, '').trim();
+  if (!raw) return [];
+  const tabCells = raw.split(/\t+/).map(normalizeText).filter(Boolean);
+  if (tabCells.length > 1) return tabCells;
+  return raw.split(/\s{3,}|\|+/).map(normalizeText).filter(Boolean);
 }
 
 function isNoiseLine(line: string): boolean {
   const s = compact(line);
   if (!s || s.length < 3) return true;
-  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد)/i.test(s);
+  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد|المورّد|customer|العميل|currency|العملة|no|رقم|item|الصنف|الصنف/الدواء|description|الوصف)/i.test(s);
+}
+
+function parseNumericTail(line: string): string[] | null {
+  const normalized = normalizeDigits(line).replace(/[\u00A0]/g, ' ').trim();
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+
+  let end = tokens.length;
+  let numericStart = end;
+  while (numericStart > 0 && isNumericToken(tokens[numericStart - 1])) numericStart--;
+  const numericCount = end - numericStart;
+  if (numericCount < 1 || numericStart < 1) return null;
+
+  // Avoid treating a standalone date/invoice number as an item.
+  const name = tokens.slice(0, numericStart).join(' ').trim();
+  if (name.length < 2 || !/[A-Za-z\u0600-\u06FF]/.test(name)) return null;
+  if (looksLikeDate(tokens[numericStart - 1]) && numericCount === 1) return null;
+
+  // Keep the product/name as the first cell and preserve the numeric tail as columns.
+  return [name, ...tokens.slice(numericStart)];
 }
 
 function detectItemRows(text: string): Array<string[]> {
   const rows: Array<string[]> = [];
-  for (const line of text.split('\n').map(normalizeText).filter(Boolean)) {
-    if (isNoiseLine(line)) continue;
-    const cells = rowCells(line);
+  for (const rawLine of text.split('\n')) {
+    const line = normalizeText(rawLine);
+    if (!line || isNoiseLine(line)) continue;
+
+    const cells = rowCells(rawLine);
     if (cells.length >= 2) {
-      const numericCount = cells.filter(c => parseNumber(c) !== 0 || /^0+$/.test(c)).length;
-      if (numericCount >= 1 && cells.some(c => /[A-Za-z\u0600-\u06FF]/.test(c))) rows.push(cells);
-      continue;
+      const numericCount = cells.filter(c => isNumericToken(c) || parseNumber(c) !== 0 || /^0+$/.test(c)).length;
+      const hasText = cells.some(c => /[A-Za-z\u0600-\u06FF]/.test(c));
+      if (numericCount >= 1 && hasText) rows.push(cells);
     }
-    const match = line.match(/^(.+?)\s+(-?\d+(?:[.,]\d+)?)\s+(?:(-?\d+(?:[.,]\d+)?)\s+)?(-?\d+(?:[.,]\d+)?)$/);
-    if (match && /[A-Za-z\u0600-\u06FF]/.test(match[1])) rows.push([match[1], match[2], match[3] || '', match[4]]);
+
+    // OCR frequently collapses table spacing to single spaces. Recover the numeric tail
+    // without assuming a fixed number of columns or a fixed document layout.
+    const numericTail = parseNumericTail(line);
+    if (numericTail && !rows.some(row => row.map(compact).join('|') === numericTail.map(compact).join('|'))) {
+      rows.push(numericTail);
+    }
   }
   return rows;
 }
