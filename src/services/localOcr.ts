@@ -25,16 +25,6 @@ function getWorker() {
   return workerPromise;
 }
 
-function makeVariants(imageDataUrl: string): OcrVariant[] {
-  if (typeof window === 'undefined') return [{ image: imageDataUrl, mode: PSM.AUTO, name: 'original' }];
-  const source = new Image();
-  const variants: OcrVariant[] = [];
-  // Image decoding is handled by the caller; this function only creates variants after load.
-  // The fallback path returns the original image when canvas processing is unavailable.
-  void source;
-  return variants;
-}
-
 async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
   if (!imageDataUrl || typeof window === 'undefined') return [{ image: imageDataUrl, mode: PSM.AUTO, name: 'original' }];
 
@@ -58,7 +48,6 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(img, 0, 0, width, height);
         const pixels = ctx.getImageData(0, 0, width, height);
-
         const gray = new Uint8ClampedArray(width * height);
         let min = 255;
         let max = 0;
@@ -74,13 +63,9 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
           const range = Math.max(1, max - min);
           for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
             let value: number;
-            if (kind === 'threshold') {
-              value = gray[p] > 168 ? 255 : 0;
-            } else if (kind === 'soft') {
-              value = Math.max(0, Math.min(255, Math.round((gray[p] - 128) * 1.45 + 128)));
-            } else {
-              value = Math.max(0, Math.min(255, Math.round(((gray[p] - min) / range) * 255)));
-            }
+            if (kind === 'threshold') value = gray[p] > 168 ? 255 : 0;
+            else if (kind === 'soft') value = Math.max(0, Math.min(255, Math.round((gray[p] - 128) * 1.45 + 128)));
+            else value = Math.max(0, Math.min(255, Math.round(((gray[p] - min) / range) * 255)));
             out.data[i] = value;
             out.data[i + 1] = value;
             out.data[i + 2] = value;
@@ -90,8 +75,6 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
           return canvas.toDataURL('image/png');
         };
 
-        // Keep the original colour image as the first pass. Different page segmentation
-        // modes catch different layouts: normal paragraphs, sparse labels and table rows.
         ctx.drawImage(img, 0, 0, width, height);
         const original = canvas.toDataURL('image/png');
         const contrast = makeImage('contrast');
