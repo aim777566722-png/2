@@ -5,22 +5,41 @@ type LayoutWord = { text: string; confidence: number; bbox: { x0: number; y0: nu
 
 let workerPromise: ReturnType<typeof createWorker> | null = null;
 
+const withTimeout = <T,>(promise: Promise<T>, ms: number, label: string): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    promise.then(value => {
+      window.clearTimeout(timer);
+      resolve(value);
+    }, error => {
+      window.clearTimeout(timer);
+      reject(error);
+    });
+  });
+
 function getWorker() {
   if (!workerPromise) {
-    workerPromise = createWorker('ara+eng', 1, {
-      logger: () => undefined,
-      langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/ara@1.0.0/4.0.0',
-      cachePath: 'purchasemate-ocr',
-      cacheMethod: 'write',
-      gzip: true,
-      workerBlobURL: true,
-    }).then(async worker => {
-      await worker.setParameters({
-        tessedit_pageseg_mode: PSM.AUTO,
-        preserve_interword_spaces: '1',
-        user_defined_dpi: '300',
-      });
-      return worker;
+    workerPromise = withTimeout(
+      createWorker('ara+eng', 1, {
+        logger: () => undefined,
+        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        cachePath: 'purchasemate-ocr',
+        cacheMethod: 'write',
+        gzip: true,
+        workerBlobURL: true,
+      }).then(async worker => {
+        await worker.setParameters({
+          tessedit_pageseg_mode: PSM.AUTO,
+          preserve_interword_spaces: '1',
+          user_defined_dpi: '300',
+        });
+        return worker;
+      }),
+      90000,
+      'تشغيل محرك OCR المحلي',
+    ).catch(error => {
+      workerPromise = null;
+      throw error;
     });
   }
   return workerPromise;
@@ -33,10 +52,10 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
     const img = new Image();
     img.onload = () => {
       try {
-        const maxDim = 2800;
+        const maxDim = 2200;
         const sourceW = img.naturalWidth || img.width || 1;
         const sourceH = img.naturalHeight || img.height || 1;
-        const scale = Math.min(2, maxDim / Math.max(sourceW, sourceH));
+        const scale = Math.min(1.6, maxDim / Math.max(sourceW, sourceH));
         const width = Math.max(1, Math.round(sourceW * scale));
         const height = Math.max(1, Math.round(sourceH * scale));
         const canvas = document.createElement('canvas');
@@ -59,14 +78,13 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
           max = Math.max(max, value);
         }
 
-        const makeImage = (kind: 'contrast' | 'threshold' | 'soft') => {
+        const makeImage = (kind: 'contrast' | 'threshold') => {
           const out = ctx.createImageData(width, height);
           const range = Math.max(1, max - min);
           for (let p = 0, i = 0; p < gray.length; p++, i += 4) {
-            let value: number;
-            if (kind === 'threshold') value = gray[p] > 168 ? 255 : 0;
-            else if (kind === 'soft') value = Math.max(0, Math.min(255, Math.round((gray[p] - 128) * 1.45 + 128)));
-            else value = Math.max(0, Math.min(255, Math.round(((gray[p] - min) / range) * 255)));
+            const value = kind === 'threshold'
+              ? (gray[p] > 168 ? 255 : 0)
+              : Math.max(0, Math.min(255, Math.round(((gray[p] - min) / range) * 255)));
             out.data[i] = value;
             out.data[i + 1] = value;
             out.data[i + 2] = value;
@@ -80,12 +98,10 @@ async function prepareVariants(imageDataUrl: string): Promise<OcrVariant[]> {
         const original = canvas.toDataURL('image/png');
         const contrast = makeImage('contrast');
         const threshold = makeImage('threshold');
-        const soft = makeImage('soft');
 
         resolve([
           { image: original, mode: PSM.AUTO, name: 'original' },
           { image: contrast, mode: PSM.SPARSE_TEXT, name: 'contrast-sparse' },
-          { image: soft, mode: PSM.SINGLE_BLOCK, name: 'enhanced-block' },
           { image: threshold, mode: PSM.SPARSE_TEXT, name: 'threshold-sparse' },
         ]);
       } catch {
@@ -175,29 +191,50 @@ export async function ocrImageDataUrlWithLayout(
   if (!imageDataUrl || typeof window === 'undefined') return { text: '', layoutText: '' };
   try {
     const worker = await getWorker();
+    onProgress?.(10);
     const variants = await prepareVariants(imageDataUrl);
     const texts: string[] = [];
     const layoutTexts: string[] = [];
 
-    for (let i = 0; i < variants.length; i++) {
-      const variant = variants[i];
+    // The first pass is the normal full-page OCR. A second pass is used only
+    // when the first result is clearly weak; this avoids four expensive OCR
+    // passes on Android for every uploaded image.
+    const first = variants[0];
+    await worker.setParameters({
+      tessedit_pageseg_mode: first.mode,
+      preserve_interword_spaces: '1',
+      user_defined_dpi: '300',
+    });
+    onProgress?.(20);
+    const firstResult = await withTimeout(worker.recognize(first.image), 180000, 'تحليل الصورة محلياً');
+    const firstText = String(firstResult?.data?.text || '').trim();
+    if (firstText) texts.push(firstText);
+    const firstWords = ((firstResult?.data as any)?.words || []) as LayoutWord[];
+    const firstLayout = buildLayoutText(firstWords);
+    if (firstLayout) layoutTexts.push(firstLayout);
+    onProgress?.(72);
+
+    const weak = firstText.length < 80 || firstWords.length < 5;
+    if (weak && variants[1]) {
+      const fallback = variants[1];
       await worker.setParameters({
-        tessedit_pageseg_mode: variant.mode,
+        tessedit_pageseg_mode: fallback.mode,
         preserve_interword_spaces: '1',
         user_defined_dpi: '300',
       });
-      const result = await worker.recognize(variant.image);
-      const text = String(result?.data?.text || '').trim();
-      if (text) texts.push(text);
-      const words = ((result?.data as any)?.words || []) as LayoutWord[];
-      const layoutText = buildLayoutText(words);
-      if (layoutText) layoutTexts.push(layoutText);
-      onProgress?.(Math.round(((i + 1) / variants.length) * 100));
+      const fallbackResult = await withTimeout(worker.recognize(fallback.image), 120000, 'التحسين الاحتياطي للصورة');
+      const fallbackText = String(fallbackResult?.data?.text || '').trim();
+      if (fallbackText) texts.push(fallbackText);
+      const fallbackWords = ((fallbackResult?.data as any)?.words || []) as LayoutWord[];
+      const fallbackLayout = buildLayoutText(fallbackWords);
+      if (fallbackLayout) layoutTexts.push(fallbackLayout);
     }
+    onProgress?.(100);
 
     return { text: mergePasses(texts), layoutText: mergePasses(layoutTexts) };
   } catch (error) {
     console.warn('Local OCR with layout failed:', error);
+    workerPromise = null;
     return { text: '', layoutText: '' };
   }
 }
