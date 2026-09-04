@@ -32,8 +32,29 @@ function proxyRequest_(method, e) {
     const status = response.getResponseCode();
     const body = response.getContentText();
 
+    let parsed = null;
+    if (body) {
+      try { parsed = JSON.parse(body); } catch (_) { parsed = null; }
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed); } catch (_) { parsed = null; }
+      }
+    }
+
+    if (status >= 200 && status < 300 && parsed && typeof parsed === 'object') {
+      if (parsed.success === true && parsed.data) {
+        return ContentService.createTextOutput(JSON.stringify(parsed)).setMimeType(ContentService.MimeType.JSON);
+      }
+      if (Array.isArray(parsed.items)) {
+        return ContentService.createTextOutput(JSON.stringify({ success: true, data: parsed, fallbackUsed: false })).setMimeType(ContentService.MimeType.JSON);
+      }
+    }
+
     return ContentService
-      .createTextOutput(body || JSON.stringify({ success: false, error: 'الخادم أعاد استجابة فارغة', upstreamStatus: status }))
+      .createTextOutput(JSON.stringify(parsed || {
+        success: false,
+        error: body || 'الخادم أعاد استجابة فارغة',
+        upstreamStatus: status
+      }))
       .setMimeType(ContentService.MimeType.JSON);
   } catch (error) {
     return ContentService
