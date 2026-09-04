@@ -154,17 +154,17 @@ function buildLayoutText(words: LayoutWord[]): string {
   rows.sort((a, b) => Math.min(...a.map(word => word.bbox.y0)) - Math.min(...b.map(word => word.bbox.y0)));
   return rows.map(row => {
     row.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-    const gaps: string[] = [];
+    const parts: string[] = [];
     for (let i = 0; i < row.length; i++) {
       if (i > 0) {
         const previous = row[i - 1];
         const gap = row[i].bbox.x0 - previous.bbox.x1;
         const width = Math.max(1, previous.bbox.x1 - previous.bbox.x0);
-        gaps.push(gap > width * 2.2 ? '\t' : ' ');
+        parts.push(gap > width * 2.2 ? ' | ' : ' ');
       }
-      gaps.push(row[i].text.trim());
+      parts.push(row[i].text.trim());
     }
-    return gaps.join('').replace(/ +\t/g, '\t').replace(/\t +/g, '\t').trim();
+    return parts.join('').replace(/\s*\|\s*/g, ' | ').trim();
   }).filter(Boolean).join('\n');
 }
 
@@ -206,7 +206,9 @@ export async function ocrImageDataUrl(
   imageDataUrl: string,
   onProgress?: (progress: number) => void,
 ): Promise<string> {
-  return (await ocrImageDataUrlWithLayout(imageDataUrl, onProgress)).text;
+  const result = await ocrImageDataUrlWithLayout(imageDataUrl, onProgress);
+  if (!result.layoutText) return result.text;
+  return [result.text, result.layoutText].filter(Boolean).join('\n');
 }
 
 export async function ocrPdfPages(
