@@ -162,7 +162,7 @@ function rowCells(value: any): string[] {
 function isNoiseLine(line: string): boolean {
   const s = compact(line);
   if (!s || s.length < 3) return true;
-  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد|المورّد|customer|العميل|currency|العملة|no|رقم|item|الصنف|الصنف/الدواء|description|الوصف)/i.test(s);
+  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد|المورّد|customer|العميل|currency|العملة|no|رقم|item|الصنف|الصنف\/الدواء|description|الوصف)/i.test(s);
 }
 
 function parseNumericTail(line: string): string[] | null {
@@ -176,12 +176,10 @@ function parseNumericTail(line: string): string[] | null {
   const numericCount = end - numericStart;
   if (numericCount < 1 || numericStart < 1) return null;
 
-  // Avoid treating a standalone date/invoice number as an item.
   const name = tokens.slice(0, numericStart).join(' ').trim();
   if (name.length < 2 || !/[A-Za-z\u0600-\u06FF]/.test(name)) return null;
   if (looksLikeDate(tokens[numericStart - 1]) && numericCount === 1) return null;
 
-  // Keep the product/name as the first cell and preserve the numeric tail as columns.
   return [name, ...tokens.slice(numericStart)];
 }
 
@@ -198,8 +196,6 @@ function detectItemRows(text: string): Array<string[]> {
       if (numericCount >= 1 && hasText) rows.push(cells);
     }
 
-    // OCR frequently collapses table spacing to single spaces. Recover the numeric tail
-    // without assuming a fixed number of columns or a fixed document layout.
     const numericTail = parseNumericTail(line);
     if (numericTail && !rows.some(row => row.map(compact).join('|') === numericTail.map(compact).join('|'))) {
       rows.push(numericTail);
