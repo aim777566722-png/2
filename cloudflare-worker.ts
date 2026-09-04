@@ -32,24 +32,34 @@ function isRetryableGeminiStatus(status: number) {
   return status === 408 || status === 409 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
-async function callGemini(env: Env, payload: any) {
+function isImageProcessingError(message: string) {
+  return /unable to process input image|unable to process image|invalid image|image processing/i.test(message);
+}
+
+function isPdfPayload(payload: any) {
+  return /\.pdf$/i.test(String(payload?.fileName || ''));
+}
+
+async function callGemini(env: Env, payload: any, includeImages = true) {
   const parts: any[] = [];
   const prompt = `You are a high-accuracy document OCR and pharmacy document extraction engine. Read Arabic and English text exactly, including handwritten text, numbers, dates, prices, quantities, medicine names, strengths and tables. Do not invent unreadable text. Return JSON only with this shape: {"items":[{"rawText":"","matchedName":"","quantity":1,"unit":"","isUncertain":false,"notes":""}],"summary":"","extractedText":""}. Preserve uncertain values and mark them isUncertain=true. Document metadata: ${JSON.stringify({ documentType: payload.documentType, extractionMode: payload.extractionMode, fileName: payload.fileName, knownMedicines: payload.knownMedicines || [], knownSuppliers: payload.knownSuppliers || [] })}.`;
   parts.push({ text: prompt });
   if (payload.fileText) parts.push({ text: `Existing extracted text:\n${payload.fileText}` });
   if (payload.tableData) parts.push({ text: `Existing table data:\n${JSON.stringify(payload.tableData)}` });
 
-  const images = Array.isArray(payload.images) ? payload.images : [];
-  for (const image of images.slice(0, 20)) {
-    const base64 = typeof image === 'string' ? image : image?.base64;
-    if (!base64) continue;
-    const mimeType = typeof image === 'string' ? 'image/jpeg' : (image?.mimeType || 'image/jpeg');
-    parts.push({
-      inline_data: {
-        mime_type: mimeType,
-        data: base64.replace(/^data:[^;]+;base64,/, ''),
-      },
-    });
+  if (includeImages) {
+    const images = Array.isArray(payload.images) ? payload.images : [];
+    for (const image of images.slice(0, 20)) {
+      const base64 = typeof image === 'string' ? image : image?.base64;
+      if (!base64) continue;
+      const mimeType = typeof image === 'string' ? 'image/jpeg' : (image?.mimeType || 'image/jpeg');
+      parts.push({
+        inline_data: {
+          mime_type: mimeType,
+          data: base64.replace(/^data:[^;]+;base64,/, ''),
+        },
+      });
+    }
   }
 
   const requestBody = {
@@ -113,8 +123,22 @@ export default {
 
     try {
       const payload = await request.json();
-      const data = await callGemini(env, payload);
-      return json({ success: true, data, fallbackUsed: false });
+      try {
+        const data = await callGemini(env, payload, true);
+        return json({ success: true, data, fallbackUsed: false });
+      } catch (firstError) {
+        const message = firstError instanceof Error ? firstError.message : String(firstError);
+
+        // Some Android/WebView PDF renderings reach Gemini as an image that the
+        // model rejects. For PDFs with extracted text/table data, retry without
+        // the image instead of failing the whole document analysis.
+        if (isPdfPayload(payload) && isImageProcessingError(message) && (payload.fileText || payload.tableData)) {
+          const data = await callGemini(env, payload, false);
+          return json({ success: true, data, fallbackUsed: true });
+        }
+
+        throw firstError;
+      }
     } catch (error) {
       return json({
         success: false,
