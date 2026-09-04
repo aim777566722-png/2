@@ -286,7 +286,7 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
         });
 
         const rawTableRows = (aggregatedTable.length > 0 || (!imagesPayload.length && aggregatedText.trim()))
-          ? mapTableDataToMedicineItems(aggregatedTable.length > 0 ? aggregatedTable : undefined, aggregatedText.trim(), files.map(f => f.name).join(' + '), knownMedicines.map(m => m.name), knownSuppliers.map(s => s.name))
+          ? mapTableDataToMedicineItems(aggregatedTable.length > 0 ? aggregatedTable : undefined, aggregatedText.trim())
           : [];
         const fullExtractedTableRows = validateAndSanitizeInvoiceItemList(rawTableRows);
 
@@ -398,9 +398,7 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
     return taskId;
   };
 
-  const startOrderTask = async ({
-    orderText, uploadedImages, inputMode, pharmacyName, orderNumber, knownMedicines, marketPrices
-  }: {
+  const startOrderTask = async ({ orderText, uploadedImages, inputMode, pharmacyName, orderNumber, knownMedicines, marketPrices }: {
     orderText?: string;
     uploadedImages?: any[];
     inputMode: 'text' | 'camera' | 'file';
