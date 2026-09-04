@@ -2,7 +2,7 @@ export interface Env {
   GEMINI_API_KEY: string;
 }
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 const MAX_REFERENCE_ITEMS = 500;
 const MAX_REFERENCE_CHARS = 24000;
 const MAX_IMAGE_BASE64_CHARS = 12_000_000;
