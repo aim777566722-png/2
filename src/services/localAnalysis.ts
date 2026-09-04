@@ -244,7 +244,7 @@ export async function analyzeDocumentLocally(params: {
   knownSuppliers?: string[];
   onProgress?: (progress: number, message: string, stage?: number) => void;
 }) {
-  const { files, targetType, knownMedicines = [], knownSuppliers = [], onProgress } = params;
+  const { files, targetType, knownSuppliers = [], onProgress } = params;
   if (!files.length) throw new Error('لا توجد ملفات للتحليل المحلي');
 
   let text = '';
@@ -290,9 +290,6 @@ export async function analyzeDocumentLocally(params: {
   const mapped = mapTableDataToMedicineItems(
     candidateRows.length ? candidateRows : undefined,
     combinedText,
-    files.map(f => f.name).join(' + '),
-    knownMedicines,
-    knownSuppliers,
   );
   const items = validateAndSanitizeInvoiceItemList(mapped);
   const metadata = extractMetadata(combinedText, files.map(f => f.name), knownSuppliers);
