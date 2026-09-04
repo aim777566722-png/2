@@ -1,6 +1,7 @@
 import { createWorker, PSM } from 'tesseract.js';
 
 type OcrVariant = { image: string; mode: PSM; name: string };
+type LayoutWord = { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } };
 
 let workerPromise: ReturnType<typeof createWorker> | null = null;
 
@@ -125,15 +126,58 @@ function mergePasses(passTexts: string[]): string {
   return Array.from(lines.values()).join('\n');
 }
 
-export async function ocrImageDataUrl(
+function buildLayoutText(words: LayoutWord[]): string {
+  const usable = words
+    .filter(word => word.text.trim() && Number.isFinite(word.confidence) && word.confidence >= 25)
+    .sort((a, b) => a.bbox.y0 - b.bbox.y0 || a.bbox.x0 - b.bbox.x0);
+  if (!usable.length) return '';
+
+  const heights = usable.map(word => Math.max(1, word.bbox.y1 - word.bbox.y0)).sort((a, b) => a - b);
+  const medianHeight = heights[Math.floor(heights.length / 2)] || 20;
+  const lineTolerance = Math.max(8, medianHeight * 0.65);
+  const rows: LayoutWord[][] = [];
+
+  for (const word of usable) {
+    const centerY = (word.bbox.y0 + word.bbox.y1) / 2;
+    let row = rows.find(candidate => {
+      const centers = candidate.map(item => (item.bbox.y0 + item.bbox.y1) / 2);
+      const average = centers.reduce((sum, value) => sum + value, 0) / centers.length;
+      return Math.abs(centerY - average) <= lineTolerance;
+    });
+    if (!row) {
+      row = [];
+      rows.push(row);
+    }
+    row.push(word);
+  }
+
+  rows.sort((a, b) => Math.min(...a.map(word => word.bbox.y0)) - Math.min(...b.map(word => word.bbox.y0)));
+  return rows.map(row => {
+    row.sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const gaps: string[] = [];
+    for (let i = 0; i < row.length; i++) {
+      if (i > 0) {
+        const previous = row[i - 1];
+        const gap = row[i].bbox.x0 - previous.bbox.x1;
+        const width = Math.max(1, previous.bbox.x1 - previous.bbox.x0);
+        gaps.push(gap > width * 2.2 ? '\t' : ' ');
+      }
+      gaps.push(row[i].text.trim());
+    }
+    return gaps.join('').replace(/ +\t/g, '\t').replace(/\t +/g, '\t').trim();
+  }).filter(Boolean).join('\n');
+}
+
+export async function ocrImageDataUrlWithLayout(
   imageDataUrl: string,
   onProgress?: (progress: number) => void,
-): Promise<string> {
-  if (!imageDataUrl || typeof window === 'undefined') return '';
+): Promise<{ text: string; layoutText: string }> {
+  if (!imageDataUrl || typeof window === 'undefined') return { text: '', layoutText: '' };
   try {
     const worker = await getWorker();
     const variants = await prepareVariants(imageDataUrl);
-    const results: string[] = [];
+    const texts: string[] = [];
+    const layoutTexts: string[] = [];
 
     for (let i = 0; i < variants.length; i++) {
       const variant = variants[i];
@@ -144,15 +188,25 @@ export async function ocrImageDataUrl(
       });
       const result = await worker.recognize(variant.image);
       const text = String(result?.data?.text || '').trim();
-      if (text) results.push(text);
+      if (text) texts.push(text);
+      const words = ((result?.data as any)?.words || []) as LayoutWord[];
+      const layoutText = buildLayoutText(words);
+      if (layoutText) layoutTexts.push(layoutText);
       onProgress?.(Math.round(((i + 1) / variants.length) * 100));
     }
 
-    return mergePasses(results);
+    return { text: mergePasses(texts), layoutText: mergePasses(layoutTexts) };
   } catch (error) {
-    console.warn('Local OCR failed:', error);
-    return '';
+    console.warn('Local OCR with layout failed:', error);
+    return { text: '', layoutText: '' };
   }
+}
+
+export async function ocrImageDataUrl(
+  imageDataUrl: string,
+  onProgress?: (progress: number) => void,
+): Promise<string> {
+  return (await ocrImageDataUrlWithLayout(imageDataUrl, onProgress)).text;
 }
 
 export async function ocrPdfPages(
