@@ -22,11 +22,15 @@ function getWorker() {
     workerPromise = withTimeout(
       createWorker('ara+eng', 1, {
         logger: () => undefined,
-        langPath: 'https://tessdata.projectnaptha.com/4.0.0',
+        // Use explicit CDN paths. This avoids relying on Tesseract's browser
+        // defaults, which can stall inside the Android WebView.
+        workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/worker.min.js',
+        corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0',
+        langPath: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0',
         cachePath: 'purchasemate-ocr',
         cacheMethod: 'write',
         gzip: true,
-        workerBlobURL: true,
+        workerBlobURL: false,
       }).then(async worker => {
         await worker.setParameters({
           tessedit_pageseg_mode: PSM.AUTO,
@@ -35,7 +39,7 @@ function getWorker() {
         });
         return worker;
       }),
-      90000,
+      150000,
       'تشغيل محرك OCR المحلي',
     ).catch(error => {
       workerPromise = null;
@@ -196,9 +200,6 @@ export async function ocrImageDataUrlWithLayout(
     const texts: string[] = [];
     const layoutTexts: string[] = [];
 
-    // The first pass is the normal full-page OCR. A second pass is used only
-    // when the first result is clearly weak; this avoids four expensive OCR
-    // passes on Android for every uploaded image.
     const first = variants[0];
     await worker.setParameters({
       tessedit_pageseg_mode: first.mode,
