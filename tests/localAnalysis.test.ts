@@ -29,4 +29,18 @@ assert.equal(english[1].unitPrice, 5, 'only mapped total/quantity may derive a m
 assert.deepEqual(extractItemsFromRows([['Phone', '123'], ['no table here']]), []);
 assert.equal(extractItemsFromRows([...ltr, ltr[1]]).length, 2, 'exact duplicate rows are removed');
 assert.equal(extractItemsFromRows([...ltr, ltr[0], ['90', 'Ibuprofen 400 mg', 'box', '1', '7.25', '7.25', '']]).length, 3, 'a repeated page header is skipped while the next page item is retained');
+
+const multiPageWithShortFooters = [
+  ...ltr,
+  ['الإجمالي', '47.50'],
+  ['الملاحظات', 'تم الاستلام'],
+  ['صفحة', '1 من 2'],
+  ltr[0],
+  ['90', 'Ibuprofen 400 mg', 'box', '1', '7.25', '7.25', ''],
+];
+assert.equal(
+  extractItemsFromRows(multiPageWithShortFooters).at(-1)?.itemName,
+  'Ibuprofen 400 mg',
+  'short footer rows must not abort extraction before the next page header'
+);
 console.log('localAnalysis tests passed');
