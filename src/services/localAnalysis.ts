@@ -59,6 +59,11 @@ function isPureNumber(value: any): boolean {
   return /^[-+]?(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[.]\d+)?$/.test(s);
 }
 
+function hasFormattedPrice(value: string): boolean {
+  const s = normalizeDigits(value).trim();
+  return /\d[,.]\d{1,2}$/.test(s) || /\d{1,3}(?:,\d{3})+(?:\.\d+)?$/.test(s);
+}
+
 function isDateLike(value: any): boolean {
   const s = normalizeDigits(value).trim();
   if (!s) return false;
@@ -109,8 +114,52 @@ function textScore(value: string): number {
   if (!value || isHeader(value) || isDateLike(value) || isPureNumber(value)) return -10000;
   if (!/[A-Za-z\u0600-\u06FF]/.test(value)) return -10000;
   let score = value.length;
-  if (/(mg|ml|mcg|iu|مجم|ملجم|مل|جم|شراب|كبسول|قرص|أقراص|مرهم|كريم|قطرة|امبول|فيال)/i.test(value)) score += 35;
+  if (/(mg|ml|mcg|iu|مجم|ملجم|مل|جم|شراب|كبسول|قرص|أقراص|مرهم|كريم|قطرة|امبول|فيال|بخاخ|كيس|علبة|باكيت|شريط|توپ|تيوب)/i.test(value)) score += 35;
   return score;
+}
+
+function cleanMedicineName(value: string): string {
+  let name = normalizeText(value)
+    .replace(/^[\s:؛,\-–—|]+|[\s:؛,\-–—|]+$/g, '')
+    .trim();
+
+  // OCR frequently attaches the rightmost product/code column to the medicine name.
+  // Remove only a standalone numeric code at the very end; pharmaceutical strengths
+  // such as 500 mg / 2250 غرام remain untouched.
+  name = name.replace(/\s+\d{4,12}$/g, '').trim();
+
+  // Short codes can also be attached after a pharmaceutical form, e.g. "علبة 32".
+  if (/(?:كيس|علبة|علب|باكيت|شريط|حبة|حبات|قرص|كبسول|امبول|فيال|تيوب|توپ)\s+\d{2,3}$/i.test(name)) {
+    name = name.replace(/\s+\d{2,3}$/g, '').trim();
+  }
+
+  return name;
+}
+
+function findUnit(cells: string[], nameIndex: number): string {
+  const unitPattern = /^(كيس|علبة|علب|باكيت|شريط|كرتون|حبة|حبات|قرص|كبسول|كبسولة|امبول|أمبول|فيال|تيوب|توپ|قطعة|وحدة|شرائط|tab|tabs|cap|caps|vial|amp|box)$/i;
+  const unitCell = cells.find(c => unitPattern.test(c.trim()));
+  if (unitCell) return normalizeText(unitCell);
+  return 'علبة';
+}
+
+function choosePrice(nums: Array<{ value: string; n: number; i: number }>): { n: number; i: number } | null {
+  const formatted = nums.filter(x => x.n > 0 && hasFormattedPrice(x.value));
+  if (formatted.length) {
+    // In pharmaceutical tables the price column is normally formatted with thousands
+    // separators/decimals, while quantity/bonus/code are integer-like.
+    return formatted.reduce((best, current) => current.i < best.i ? current : best, formatted[0]);
+  }
+  const plausible = nums.filter(x => x.n > 0 && x.n >= 100 && x.n < 10000000);
+  if (!plausible.length) return null;
+  return plausible.reduce((best, current) => current.n < best.n ? current : best, plausible[0]);
+}
+
+function chooseQuantity(nums: Array<{ value: string; n: number; i: number }>, nameIndex: number, priceIndex: number | null): number {
+  const candidates = nums
+    .filter(x => Number.isInteger(x.n) && x.n >= 1 && x.n <= 1000 && x.i !== priceIndex)
+    .sort((a, b) => Math.abs(a.i - nameIndex) - Math.abs(b.i - nameIndex));
+  return candidates[0]?.n || 1;
 }
 
 function createItem(name: string, quantity: number, unitPrice: number, totalPrice: number, rawText: string, unit = 'علبة') {
@@ -119,7 +168,7 @@ function createItem(name: string, quantity: number, unitPrice: number, totalPric
   const total = totalPrice > 0 ? totalPrice : (p > 0 ? p * q : 0);
   return {
     id: `local-${Date.now()}-${itemCounter++}`,
-    itemName: name,
+    itemName: cleanMedicineName(name),
     quantity: q,
     unit,
     unitPrice: p,
@@ -138,10 +187,15 @@ function parseRow(row: any, rowIndex: number): any | null {
   if (!clean.length || clean.every(isHeader)) return null;
 
   let name = '';
+  let nameIndex = -1;
   let nameScore = -1;
-  clean.forEach(c => {
+  clean.forEach((c, i) => {
     const score = textScore(c);
-    if (score > nameScore) { nameScore = score; name = c; }
+    if (score > nameScore) {
+      nameScore = score;
+      name = c;
+      nameIndex = i;
+    }
   });
   if (!name) return null;
 
@@ -150,40 +204,26 @@ function parseRow(row: any, rowIndex: number): any | null {
     .filter(x => isPureNumber(x.value) && !isDateLike(x.value) && Number.isFinite(x.n) && x.n >= 0 && x.n < 100000000);
   if (!nums.length) return null;
 
-  const numeric = nums.filter((x, i) => !(i === 0 && x.i === 0 && Number.isInteger(x.n) && x.n === rowIndex + 1 && x.n < 10000));
+  // Ignore the visible row sequence when OCR puts it in the first cell.
+  const numeric = nums.filter(x => !(x.i === 0 && Number.isInteger(x.n) && x.n === rowIndex + 1 && x.n < 10000));
   if (!numeric.length) return null;
 
-  const values = numeric.map(x => x.n);
-  let quantity = 1;
-  let unitPrice = 0;
-  let totalPrice = 0;
+  const priceCell = choosePrice(numeric);
+  const priceIndex = priceCell?.i ?? null;
+  const unitPrice = priceCell?.n || 0;
+  const quantity = chooseQuantity(numeric, nameIndex, priceIndex);
+  const unit = findUnit(clean, nameIndex);
 
-  if (values.length === 1) {
-    unitPrice = values[0];
-    totalPrice = unitPrice;
-  } else {
-    const last = values[values.length - 1];
-    const prev = values[values.length - 2];
-    const before = values.length >= 3 ? values[values.length - 3] : 0;
+  // If a total column is present and clearly matches quantity × unit price, keep it.
+  let totalPrice = unitPrice > 0 ? unitPrice * quantity : 0;
+  const remaining = numeric.filter(x => x.i !== priceIndex && x.i !== 0);
+  const matchingTotal = remaining.find(x => x.n > 0 && Math.abs(x.n - unitPrice * quantity) <= Math.max(1, unitPrice * quantity * 0.03));
+  if (matchingTotal && matchingTotal.i !== nameIndex) totalPrice = matchingTotal.n;
 
-    if (values.length >= 3 && Number.isInteger(before) && before > 0 && before <= 10000 && Math.abs(before * prev - last) <= Math.max(1, last * 0.03)) {
-      quantity = before;
-      unitPrice = prev;
-      totalPrice = last;
-    } else if (values.length === 2 && Number.isInteger(values[0]) && values[0] > 0 && values[0] <= 10000) {
-      quantity = values[0];
-      unitPrice = values[1];
-      totalPrice = unitPrice * quantity;
-    } else {
-      unitPrice = prev > 0 ? prev : last;
-      totalPrice = last > 0 ? last : unitPrice;
-      const qtyCandidate = values.find(v => Number.isInteger(v) && v > 0 && v <= 10000 && v !== unitPrice && v !== totalPrice);
-      if (qtyCandidate) quantity = qtyCandidate;
-      if (unitPrice === totalPrice && quantity > 1) totalPrice = unitPrice * quantity;
-    }
-  }
+  const cleanedName = cleanMedicineName(name);
+  if (cleanedName.length < 2) return null;
 
-  return createItem(name, quantity, unitPrice, totalPrice, clean.join(' | '));
+  return createItem(cleanedName, quantity, unitPrice, totalPrice, clean.join(' | '), unit);
 }
 
 function parseRows(rows: any[]): any[] {
@@ -191,7 +231,7 @@ function parseRows(rows: any[]): any[] {
   const seen = new Set<string>();
   rows.forEach((row, index) => {
     const item = parseRow(row, index);
-    if (!item) return;
+    if (!item || !item.itemName) return;
     const fullKey = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`;
     if (seen.has(fullKey)) return;
     seen.add(fullKey);
