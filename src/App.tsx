@@ -55,12 +55,19 @@ export default function App() {
 
   // Load from storage
   useEffect(() => {
-    setMedicines(Storage.getMedicines());
-    setSuppliers(Storage.getSuppliers());
-    setMarketPrices(Storage.getMarketPrices());
-    setOrders(Storage.getOrders());
-    setInvoices(Storage.getInvoices());
-    setReconciliations(Storage.getReconciliations());
+    let mounted = true;
+    const load = async () => {
+      await Storage.hydrate();
+      if (!mounted) return;
+      setMedicines(Storage.getMedicines());
+      setSuppliers(Storage.getSuppliers());
+      setMarketPrices(Storage.getMarketPrices());
+      setOrders(Storage.getOrders());
+      setInvoices(Storage.getInvoices());
+      setReconciliations(Storage.getReconciliations());
+    };
+    void load();
+    return () => { mounted = false; };
   }, []);
 
   // Hardware Back Button listener for Android via Capacitor

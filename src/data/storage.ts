@@ -71,6 +71,17 @@ function persistToIndexedDB(key: string, value: any) {
   });
 }
 
+function readFromIndexedDB(key: string): Promise<any | undefined> {
+  return getIndexedDB().then(db => new Promise(resolve => {
+    if (!db) return resolve(undefined);
+    try {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(undefined);
+    } catch { resolve(undefined); }
+  }));
+}
+
 function safeLocalStorageSet(key: string, value: any) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
@@ -84,6 +95,22 @@ function safeLocalStorageSet(key: string, value: any) {
 }
 
 export const Storage = {
+  /** Restore the durable IndexedDB copy when localStorage was unavailable/quota-limited. */
+  async hydrate(): Promise<void> {
+    const collections: Array<[keyof typeof STORAGE_KEYS, keyof typeof memoryCache]> = [
+      ['MEDICINES', 'medicines'], ['SUPPLIERS', 'suppliers'], ['MARKET_PRICES', 'marketPrices'],
+      ['ORDERS', 'orders'], ['INVOICES', 'invoices'], ['RECONCILIATIONS', 'reconciliations'],
+    ];
+    await Promise.all(collections.map(async ([keyName, cacheKey]) => {
+      const key = STORAGE_KEYS[keyName];
+      // localStorage remains the compatibility source when it contains valid data.
+      try { if (localStorage.getItem(key)) return; } catch { /* IndexedDB only mode */ }
+      const value = await readFromIndexedDB(key);
+      if (!Array.isArray(value)) return;
+      (memoryCache as any)[cacheKey] = value;
+      try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota-limited; cache is enough */ }
+    }));
+  },
   getMedicines(): Medicine[] {
     if (memoryCache.medicines) return memoryCache.medicines;
     try {
@@ -507,4 +534,3 @@ export const Storage = {
     safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
   }
 };
-
