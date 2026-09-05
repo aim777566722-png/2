@@ -22,15 +22,17 @@ function getWorker() {
     workerPromise = withTimeout(
       createWorker('ara+eng', 1, {
         logger: () => undefined,
-        // Use explicit CDN paths. This avoids relying on Tesseract's browser
-        // defaults, which can stall inside the Android WebView.
         workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/worker.min.js',
+        // Keep corePath as a directory so Tesseract can select the correct
+        // WASM variant for the Android WebView (SIMD/non-SIMD).
         corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0',
         langPath: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0',
         cachePath: 'purchasemate-ocr',
         cacheMethod: 'write',
         gzip: true,
-        workerBlobURL: false,
+        // Blob workers are more reliable in Android WebView than a direct
+        // cross-origin Worker URL.
+        workerBlobURL: true,
       }).then(async worker => {
         await worker.setParameters({
           tessedit_pageseg_mode: PSM.AUTO,
@@ -194,6 +196,7 @@ export async function ocrImageDataUrlWithLayout(
 ): Promise<{ text: string; layoutText: string }> {
   if (!imageDataUrl || typeof window === 'undefined') return { text: '', layoutText: '' };
   try {
+    onProgress?.(5);
     const worker = await getWorker();
     onProgress?.(10);
     const variants = await prepareVariants(imageDataUrl);
@@ -234,9 +237,9 @@ export async function ocrImageDataUrlWithLayout(
 
     return { text: mergePasses(texts), layoutText: mergePasses(layoutTexts) };
   } catch (error) {
-    console.warn('Local OCR with layout failed:', error);
+    console.error('Local OCR with layout failed:', error);
     workerPromise = null;
-    return { text: '', layoutText: '' };
+    throw error;
   }
 }
 
