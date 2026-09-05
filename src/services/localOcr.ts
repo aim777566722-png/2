@@ -23,15 +23,11 @@ function getWorker() {
       createWorker('ara+eng', 1, {
         logger: () => undefined,
         workerPath: 'https://cdn.jsdelivr.net/npm/tesseract.js@7.0.0/dist/worker.min.js',
-        // Keep corePath as a directory so Tesseract can select the correct
-        // WASM variant for the Android WebView (SIMD/non-SIMD).
         corePath: 'https://cdn.jsdelivr.net/npm/tesseract.js-core@7.0.0',
         langPath: 'https://cdn.jsdelivr.net/gh/naptha/tessdata@gh-pages/4.0.0',
         cachePath: 'purchasemate-ocr',
         cacheMethod: 'write',
         gzip: true,
-        // Blob workers are more reliable in Android WebView than a direct
-        // cross-origin Worker URL.
         workerBlobURL: true,
       }).then(async worker => {
         await worker.setParameters({
@@ -148,6 +144,19 @@ function mergePasses(passTexts: string[]): string {
   return Array.from(lines.values()).join('\n');
 }
 
+function isArabicText(value: string): boolean {
+  const arabic = (value.match(/[\u0600-\u06FF]/g) || []).length;
+  const latin = (value.match(/[A-Za-z]/g) || []).length;
+  return arabic > 0 && arabic >= latin;
+}
+
+function buildCell(words: LayoutWord[]): string {
+  if (!words.length) return '';
+  const arabic = isArabicText(words.map(w => w.text).join(' '));
+  const ordered = [...words].sort((a, b) => arabic ? b.bbox.x0 - a.bbox.x0 : a.bbox.x0 - b.bbox.x0);
+  return ordered.map(w => w.text.trim()).filter(Boolean).join(' ');
+}
+
 function buildLayoutText(words: LayoutWord[]): string {
   const usable = words
     .filter(word => word.text.trim() && Number.isFinite(word.confidence) && word.confidence >= 25)
@@ -175,18 +184,34 @@ function buildLayoutText(words: LayoutWord[]): string {
 
   rows.sort((a, b) => Math.min(...a.map(word => word.bbox.y0)) - Math.min(...b.map(word => word.bbox.y0)));
   return rows.map(row => {
-    row.sort((a, b) => a.bbox.x0 - b.bbox.x0);
-    const parts: string[] = [];
-    for (let i = 0; i < row.length; i++) {
-      if (i > 0) {
-        const previous = row[i - 1];
-        const gap = row[i].bbox.x0 - previous.bbox.x1;
-        const width = Math.max(1, previous.bbox.x1 - previous.bbox.x0);
-        parts.push(gap > width * 2.2 ? ' | ' : ' ');
-      }
-      parts.push(row[i].text.trim());
+    // Detect the large horizontal gaps between table columns first. This prevents
+    // Arabic words inside the medicine cell from being reversed with other columns.
+    const leftToRight = [...row].sort((a, b) => a.bbox.x0 - b.bbox.x0);
+    const gaps: number[] = [];
+    for (let i = 1; i < leftToRight.length; i++) {
+      gaps.push(leftToRight[i].bbox.x0 - leftToRight[i - 1].bbox.x1);
     }
-    return parts.join('').replace(/\s*\|\s*/g, ' | ').trim();
+    const positiveGaps = gaps.filter(g => g > 0).sort((a, b) => a - b);
+    const medianGap = positiveGaps[Math.floor(positiveGaps.length / 2)] || 0;
+    const cellGap = Math.max(18, medianGap * 2.8);
+
+    const cells: LayoutWord[][] = [];
+    for (const word of leftToRight) {
+      const previousCell = cells[cells.length - 1];
+      if (!previousCell) {
+        cells.push([word]);
+        continue;
+      }
+      const previous = previousCell[previousCell.length - 1];
+      const gap = word.bbox.x0 - previous.bbox.x1;
+      if (gap >= cellGap) cells.push([word]);
+      else previousCell.push(word);
+    }
+
+    // The source table is Arabic/RTL. Return cells right-to-left so the parser sees
+    // the natural document order: code | name | unit | quantity | bonus | price | batch | expiry.
+    const orderedCells = [...cells].reverse();
+    return orderedCells.map(buildCell).filter(Boolean).join(' | ').trim();
   }).filter(Boolean).join('\n');
 }
 
