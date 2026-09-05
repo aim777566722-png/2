@@ -1,4 +1,3 @@
-import { mapTableDataToMedicineItems } from '../utils/documentParser';
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
 
 type LocalAnalysisFile = {
@@ -19,252 +18,232 @@ type LocalMetadata = {
   title: string;
 };
 
-const ARABIC_DIGITS = '٠١٢٣٤٥٦٧٨٩';
-const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
+const AR = '٠١٢٣٤٥٦٧٨٩';
+const FA = '۰۱۲۳۴۵۶۷۸۹';
+let itemCounter = 0;
 
-function normalizeDigits(value: string): string {
-  return String(value || '')
-    .replace(/[٠-٩]/g, d => String(ARABIC_DIGITS.indexOf(d)))
-    .replace(/[۰-۹]/g, d => String(PERSIAN_DIGITS.indexOf(d)));
+function normalizeDigits(value: any): string {
+  return String(value ?? '')
+    .replace(/[٠-٩]/g, d => String(AR.indexOf(d)))
+    .replace(/[۰-۹]/g, d => String(FA.indexOf(d)));
 }
 
-function normalizeText(value: string): string {
-  return normalizeDigits(String(value || ''))
+function normalizeText(value: any): string {
+  return normalizeDigits(value)
     .replace(/[\u064B-\u065F\u0670]/g, '')
     .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
     .replace(/[\u00A0\t]+/g, ' ')
-    .replace(/[ ]{2,}/g, ' ')
     .replace(/\r/g, '')
+    .replace(/ {2,}/g, ' ')
     .trim();
 }
 
-function compact(value: string): string {
-  return normalizeText(value).toLowerCase().replace(/[\s:：._-]+/g, '');
+function compact(value: any): string {
+  return normalizeText(value).toLowerCase().replace(/[\s:：._\-\/]+/g, '');
 }
 
 function parseNumber(value: any): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
-  const normalized = normalizeDigits(String(value ?? ''))
-    .replace(/[٬،]/g, ',')
-    .replace(/\s/g, '')
-    .replace(/[^0-9.,-]/g, '');
-  if (!normalized) return 0;
-  const lastComma = normalized.lastIndexOf(',');
-  const lastDot = normalized.lastIndexOf('.');
-  const cleaned = lastComma > lastDot
-    ? normalized.replace(/\./g, '').replace(',', '.')
-    : normalized.replace(/,/g, '');
-  const result = Number(cleaned);
-  return Number.isFinite(result) ? result : 0;
+  let s = normalizeDigits(value).trim().replace(/[٬،]/g, ',').replace(/\s/g, '').replace(/[^0-9.,+\-]/g, '');
+  if (!s) return 0;
+  const comma = s.lastIndexOf(',');
+  const dot = s.lastIndexOf('.');
+  if (comma >= 0 && dot >= 0) s = comma > dot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (comma >= 0) s = /,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, '');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
 }
 
-function isNumericToken(value: string): boolean {
-  const normalized = normalizeDigits(value).trim().replace(/[٬،]/g, ',');
-  return /^-?(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[.]\d+)?$/.test(normalized) && /\d/.test(normalized);
+function isPureNumber(value: any): boolean {
+  const s = normalizeDigits(value).trim().replace(/[٬،]/g, ',').replace(/\s/g, '');
+  return /^[-+]?(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[.]\d+)?$/.test(s);
 }
 
-function looksLikeDate(value: string): boolean {
+function isDateLike(value: any): boolean {
   const s = normalizeDigits(value).trim();
   if (!s) return false;
-  return /^(?:20\d{2}[-/.](?:0?[1-9]|1[0-2])(?:[-/.](?:0?[1-9]|[12]\d|3[01]))?|(?:0?[1-9]|[12]\d|3[01])[-/.](?:0?[1-9]|1[0-2])[-/.](?:20)?\d{2}|(?:0?[1-9]|1[0-2])[-/.](?:20)?\d{2})$/.test(s);
+  if (/^\d+(?:\.\d+)?\s*[\/\*]\s*\d+(?:\.\d+)?\s*(?:mg|g|ml|mcg|iu|مجم|ملجم|مل|جم)?$/i.test(s)) return false;
+  return /^(?:20\d{2}[\/.\-]\d{1,2}(?:[\/.\-]\d{1,2})?|\d{1,2}[\/.\-]\d{1,2}[\/.\-](?:20)?\d{2}|\d{1,2}[\/.\-](?:20)?\d{2})$/.test(s);
+}
+
+function extractFirst(text: string, patterns: RegExp[]): string {
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m?.[1]) return normalizeText(m[1]);
+  }
+  return '';
 }
 
 function normalizeDate(value: string): string {
   const s = normalizeDigits(value).trim();
-  if (!looksLikeDate(s)) return '';
-  const parts = s.split(/[\/.\-]/).map(Number);
-  if (parts.length === 3) {
-    let [a, b, c] = parts;
-    if (a < 100) a += 2000;
-    if (a >= 1900) return `${a.toString().padStart(4, '0')}-${b.toString().padStart(2, '0')}-${c.toString().padStart(2, '0')}`;
-    if (c < 100) c += 2000;
-    return `${c.toString().padStart(4, '0')}-${b.toString().padStart(2, '0')}-${a.toString().padStart(2, '0')}`;
+  if (!isDateLike(s)) return '';
+  const p = s.split(/[/.\-]/).map(Number);
+  if (p.length === 3) {
+    if (p[0] >= 1900) return `${p[0].toString().padStart(4, '0')}-${p[1].toString().padStart(2, '0')}-${p[2].toString().padStart(2, '0')}`;
+    const y = p[2] < 100 ? p[2] + 2000 : p[2];
+    return `${y.toString().padStart(4, '0')}-${p[1].toString().padStart(2, '0')}-${p[0].toString().padStart(2, '0')}`;
   }
-  if (parts.length === 2) {
-    let [month, year] = parts;
-    if (year < 100) year += 2000;
-    return `${year.toString().padStart(4, '0')}-${month.toString().padStart(2, '0')}`;
+  if (p.length === 2) {
+    const y = p[1] < 100 ? p[1] + 2000 : p[1];
+    return `${y.toString().padStart(4, '0')}-${p[0].toString().padStart(2, '0')}`;
   }
   return '';
 }
 
-function extractFirst(text: string, patterns: RegExp[]): string {
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) return normalizeText(match[1]);
-  }
-  return '';
-}
-
-function inferTitle(text: string, fileNames: string[]): string {
-  const hints: Array<[RegExp, string]> = [
-    [/sales\s*return|return\s*invoice|مرتجع|مرتجعات|إرجاع/i, 'مرتجع'],
-    [/purchase\s*order|أمر\s*شراء|طلب\s*شراء/i, 'أمر شراء'],
-    [/price\s*list|قائمة\s*أسعار|اسعار/i, 'قائمة أسعار'],
-    [/invoice|فاتورة/i, 'فاتورة'],
-  ];
-  for (const [pattern, title] of hints) if (pattern.test(text)) return title;
-  return fileNames.length === 1 ? fileNames[0] : fileNames.join(' + ');
-}
-
-function extractMetadata(text: string, fileNames: string[], knownSuppliers: string[]): LocalMetadata {
-  const joined = text.split('\n').map(normalizeText).filter(Boolean).join('\n');
-  const documentNumber = extractFirst(joined, [
-    /(?:invoice|inv|فاتورة|الفاتورة|رقم\s*الفاتورة|رقم\s*المستند|document\s*(?:no|number)|document\s*#|order\s*(?:no|number)|order\s*#|أمر\s*شراء|طلب\s*شراء|no\.?\s*#?)\s*[:#№-]?\s*([A-Z0-9][A-Z0-9\/_-]{1,30})/i,
-  ]);
-  let documentDate = extractFirst(joined, [
-    /(?:date|dated|تاريخ|التاريخ|تاريخ\s*الفاتورة|تاريخ\s*الطلب)\s*[:：-]?\s*([0-9]{1,4}[\/.\-][0-9]{1,2}(?:[\/.\-][0-9]{2,4})?)/i,
-    /\b(20[0-3]\d[\/.\-](?:0?[1-9]|1[0-2])[\/.\-](?:0?[1-9]|[12]\d|3[01]))\b/,
-    /\b((?:0?[1-9]|[12]\d|3[01])[\/.\-](?:0?[1-9]|1[0-2])[\/.\-](?:20)?\d{2})\b/,
-  ]);
-  documentDate = normalizeDate(documentDate);
-
-  const currency = extractFirst(joined, [
-    /(?:currency|العملة|عملة)\s*[:：-]?\s*([^\n]+)/i,
-    /\b(YER|SAR|USD|EUR|AED|OMR|KWD|QAR|BHD|JOD|ريال\s*يمني|ريال|دولار|يورو|درهم|دينار)\b/i,
-  ]);
-
-  let partyName = '';
-  for (const supplier of knownSuppliers) {
-    const candidate = normalizeText(supplier);
-    if (candidate && joined.toLowerCase().includes(candidate.toLowerCase())) {
-      partyName = candidate;
-      break;
-    }
-  }
-  if (!partyName) {
-    partyName = extractFirst(joined, [
-      /(?:supplier|vendor|company|customer|client|party|المورد|المورّد|الشركة|العميل|الزبون|الجهة)\s*[:：-]\s*([^\n]+)/i,
-    ]);
-  }
-
-  return {
-    documentNumber,
-    documentDate,
-    partyName,
-    currency,
-    title: extractFirst(joined, [
-      /(?:document\s*title|title|نوع\s*المستند|نوع\s*الوثيقة)\s*[:：-]\s*([^\n]+)/i,
-    ]) || inferTitle(joined, fileNames),
-  };
+function isHeader(value: string): boolean {
+  const s = compact(value);
+  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد|المورّد|customer|العميل|currency|العملة|item|الصنف|الصنفالدواء|description|الوصف|price|السعر|quantity|الكمية|qty|عدد|no|رقم|code|كود|barcode|باركود)$/.test(s);
 }
 
 function rowCells(value: any): string[] {
-  if (Array.isArray(value)) return value.map(v => normalizeText(String(v ?? ''))).filter(Boolean);
-  if (value && typeof value === 'object') return Object.values(value).map(v => normalizeText(String(v ?? ''))).filter(Boolean);
+  if (Array.isArray(value)) return value.map(v => normalizeText(v)).filter(Boolean);
+  if (value && typeof value === 'object') return Object.values(value).map(v => normalizeText(v)).filter(Boolean);
   const raw = String(value ?? '').replace(/\r/g, '').trim();
   if (!raw) return [];
-  const tabCells = raw.split(/\t+/).map(normalizeText).filter(Boolean);
-  if (tabCells.length > 1) return tabCells;
-  return raw.split(/\s{3,}|\|+/).map(normalizeText).filter(Boolean);
+  if (raw.includes('|')) return raw.split(/\s*\|\s*/).map(normalizeText).filter(Boolean);
+  if (raw.includes('\t')) return raw.split(/\t+/).map(normalizeText).filter(Boolean);
+  return raw.split(/\s{2,}/).map(normalizeText).filter(Boolean);
 }
 
-function isNoiseLine(line: string): boolean {
-  const s = compact(line);
-  if (!s || s.length < 3) return true;
-  return /^(page|صفحة|total|subtotal|grandtotal|المجموع|الإجمالي|اجمالي|date|التاريخ|invoice|فاتورة|supplier|المورد|المورّد|customer|العميل|currency|العملة|no|رقم|item|الصنف|الصنف\/الدواء|description|الوصف)/i.test(s);
+function textScore(value: string): number {
+  if (!value || isHeader(value) || isDateLike(value) || isPureNumber(value)) return -10000;
+  if (!/[A-Za-z\u0600-\u06FF]/.test(value)) return -10000;
+  let score = value.length;
+  if (/(mg|ml|mcg|iu|مجم|ملجم|مل|جم|شراب|كبسول|قرص|أقراص|مرهم|كريم|قطرة|امبول|فيال)/i.test(value)) score += 35;
+  return score;
 }
 
-function parseNumericTail(line: string): string[] | null {
-  const normalized = normalizeDigits(line).replace(/[\u00A0]/g, ' ').trim();
-  const tokens = normalized.split(/\s+/).filter(Boolean);
-  if (tokens.length < 2) return null;
-
-  let end = tokens.length;
-  let numericStart = end;
-  while (numericStart > 0 && isNumericToken(tokens[numericStart - 1])) numericStart--;
-  const numericCount = end - numericStart;
-  if (numericCount < 1 || numericStart < 1) return null;
-
-  const name = tokens.slice(0, numericStart).join(' ').trim();
-  if (name.length < 2 || !/[A-Za-z\u0600-\u06FF]/.test(name)) return null;
-  if (looksLikeDate(tokens[numericStart - 1]) && numericCount === 1) return null;
-
-  return [name, ...tokens.slice(numericStart)];
+function createItem(name: string, quantity: number, unitPrice: number, totalPrice: number, rawText: string, unit = 'علبة') {
+  const q = quantity > 0 ? quantity : 1;
+  const p = unitPrice > 0 ? unitPrice : 0;
+  const total = totalPrice > 0 ? totalPrice : (p > 0 ? p * q : 0);
+  return {
+    id: `local-${Date.now()}-${itemCounter++}`,
+    itemName: name,
+    quantity: q,
+    unit,
+    unitPrice: p,
+    totalPrice: total,
+    bonusScheme: '',
+    discountPercent: 0,
+    notes: '',
+    rawText,
+  };
 }
 
-function detectItemRows(text: string): Array<string[]> {
-  const rows: Array<string[]> = [];
-  for (const rawLine of text.split('\n')) {
-    const line = normalizeText(rawLine);
-    if (!line || isNoiseLine(line)) continue;
+function parseRow(row: any, rowIndex: number): any | null {
+  const cells = rowCells(row);
+  if (!cells.length) return null;
+  const clean = cells.map(normalizeText).filter(Boolean);
+  if (!clean.length || clean.every(isHeader)) return null;
 
-    const cells = rowCells(rawLine);
-    if (cells.length >= 2) {
-      const numericCount = cells.filter(c => isNumericToken(c) || parseNumber(c) !== 0 || /^0+$/.test(c)).length;
-      const hasText = cells.some(c => /[A-Za-z\u0600-\u06FF]/.test(c));
-      if (numericCount >= 1 && hasText) rows.push(cells);
-    }
+  let name = '';
+  let nameScore = -1;
+  clean.forEach(c => {
+    const score = textScore(c);
+    if (score > nameScore) { nameScore = score; name = c; }
+  });
+  if (!name) return null;
 
-    const numericTail = parseNumericTail(line);
-    if (numericTail && !rows.some(row => row.map(compact).join('|') === numericTail.map(compact).join('|'))) {
-      rows.push(numericTail);
+  const nums = clean
+    .map((c, i) => ({ value: c, n: parseNumber(c), i }))
+    .filter(x => isPureNumber(x.value) && !isDateLike(x.value) && Number.isFinite(x.n) && x.n >= 0 && x.n < 100000000);
+  if (!nums.length) return null;
+
+  const numeric = nums.filter((x, i) => !(i === 0 && x.i === 0 && Number.isInteger(x.n) && x.n === rowIndex + 1 && x.n < 10000));
+  if (!numeric.length) return null;
+
+  const values = numeric.map(x => x.n);
+  let quantity = 1;
+  let unitPrice = 0;
+  let totalPrice = 0;
+
+  if (values.length === 1) {
+    unitPrice = values[0];
+    totalPrice = unitPrice;
+  } else {
+    const last = values[values.length - 1];
+    const prev = values[values.length - 2];
+    const before = values.length >= 3 ? values[values.length - 3] : 0;
+
+    if (values.length >= 3 && Number.isInteger(before) && before > 0 && before <= 10000 && Math.abs(before * prev - last) <= Math.max(1, last * 0.03)) {
+      quantity = before;
+      unitPrice = prev;
+      totalPrice = last;
+    } else if (values.length === 2 && Number.isInteger(values[0]) && values[0] > 0 && values[0] <= 10000) {
+      quantity = values[0];
+      unitPrice = values[1];
+      totalPrice = unitPrice * quantity;
+    } else {
+      unitPrice = prev > 0 ? prev : last;
+      totalPrice = last > 0 ? last : unitPrice;
+      const qtyCandidate = values.find(v => Number.isInteger(v) && v > 0 && v <= 10000 && v !== unitPrice && v !== totalPrice);
+      if (qtyCandidate) quantity = qtyCandidate;
+      if (unitPrice === totalPrice && quantity > 1) totalPrice = unitPrice * quantity;
     }
   }
-  return rows;
+
+  return createItem(name, quantity, unitPrice, totalPrice, clean.join(' | '));
 }
 
-function dedupeRows(rows: Array<string[]>): Array<string[]> {
+function parseRows(rows: any[]): any[] {
+  const result: any[] = [];
   const seen = new Set<string>();
-  const result: Array<string[]> = [];
-  for (const row of rows) {
-    const cleaned = row.map(normalizeText).filter(Boolean);
-    const key = cleaned.map(compact).join('|');
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    result.push(cleaned);
-  }
+  rows.forEach((row, index) => {
+    const item = parseRow(row, index);
+    if (!item) return;
+    const fullKey = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`;
+    if (seen.has(fullKey)) return;
+    seen.add(fullKey);
+    result.push(item);
+  });
   return result;
+}
+
+function extractMetadata(text: string, names: string[], suppliers: string[]): LocalMetadata {
+  const joined = text.split('\n').map(normalizeText).filter(Boolean).join('\n');
+  const documentNumber = extractFirst(joined, [
+    /(?:invoice|inv|فاتورة|الفاتورة|رقم\s*الفاتورة|رقم\s*المستند|document\s*(?:no|number)|order\s*(?:no|number)|أمر\s*شراء|طلب\s*شراء)\s*[:#№-]?\s*([A-Z0-9][A-Z0-9\/_-]{1,30})/i,
+  ]);
+  const dateRaw = extractFirst(joined, [
+    /(?:date|dated|تاريخ|التاريخ|تاريخ\s*الفاتورة|تاريخ\s*الطلب)\s*[:：-]?\s*([0-9٠-٩۰-۹]{1,4}[/.\-][0-9٠-٩۰-۹]{1,2}(?:[/.\-][0-9٠-٩۰-۹]{2,4})?)/i,
+  ]);
+  let partyName = '';
+  for (const supplier of suppliers) {
+    const s = normalizeText(supplier);
+    if (s && joined.toLowerCase().includes(s.toLowerCase())) { partyName = s; break; }
+  }
+  if (!partyName) partyName = extractFirst(joined, [/(?:supplier|vendor|company|customer|client|party|المورد|المورّد|الشركة|العميل|الزبون|الجهة)\s*[:：-]\s*([^\n]+)/i]);
+  const currency = extractFirst(joined, [/(?:currency|العملة|عملة)\s*[:：-]?\s*([^\n]+)/i, /\b(YER|SAR|USD|EUR|AED|OMR|KWD|QAR|BHD|JOD|ريال\s*يمني|ريال|دولار|يورو|درهم|دينار)\b/i]);
+  let title = extractFirst(joined, [/(?:document\s*title|title|نوع\s*المستند|نوع\s*الوثيقة)\s*[:：-]\s*([^\n]+)/i]);
+  if (!title) title = /مرتجع|مرتجعات|إرجاع|sales\s*return|return\s*invoice/i.test(joined) ? 'مرتجع' : /أمر\s*شراء|طلب\s*شراء|purchase\s*order/i.test(joined) ? 'أمر شراء' : /قائمة\s*أسعار|price\s*list|اسعار/i.test(joined) ? 'قائمة أسعار' : /فاتورة|invoice/i.test(joined) ? 'فاتورة' : (names.length === 1 ? names[0] : names.join(' + '));
+  return { documentNumber, documentDate: normalizeDate(dateRaw), partyName, currency, title };
 }
 
 async function preprocessImage(dataUrl: string): Promise<string> {
   if (!dataUrl || typeof window === 'undefined') return dataUrl;
   return new Promise(resolve => {
     const img = new Image();
-    let done = false;
-    const finish = (value: string) => {
-      if (done) return;
-      done = true;
-      resolve(value);
-    };
     img.onload = () => {
       try {
         const max = 2800;
-        const scale = Math.min(2.2, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
-        const width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
-        const height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
-        const canvas = document.createElement('canvas');
-        canvas.width = width;
-        canvas.height = height;
+        const scale = Math.min(2.0, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const w = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
+        const h = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+        const canvas = document.createElement('canvas'); canvas.width = w; canvas.height = h;
         const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) return finish(dataUrl);
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-        const image = ctx.getImageData(0, 0, width, height);
-        for (let i = 0; i < image.data.length; i += 4) {
-          const r = image.data[i];
-          const g = image.data[i + 1];
-          const b = image.data[i + 2];
-          const gray = Math.max(0, Math.min(255, Math.round((0.299 * r + 0.587 * g + 0.114 * b - 128) * 1.32 + 128)));
-          image.data[i] = gray;
-          image.data[i + 1] = gray;
-          image.data[i + 2] = gray;
-        }
-        ctx.putImageData(image, 0, 0);
-        finish(canvas.toDataURL('image/png'));
-      } catch {
-        finish(dataUrl);
-      }
+        if (!ctx) return resolve(dataUrl);
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/png'));
+      } catch { resolve(dataUrl); }
     };
-    img.onerror = () => finish(dataUrl);
+    img.onerror = () => resolve(dataUrl);
     img.src = dataUrl.startsWith('data:') ? dataUrl : `data:image/jpeg;base64,${dataUrl}`;
   });
 }
 
-function asDataUrl(base64: string, mimeType = 'image/jpeg'): string {
-  if (/^data:/i.test(base64)) return base64;
-  return `data:${mimeType};base64,${base64}`;
+function asDataUrl(value: string, mime = 'image/jpeg'): string {
+  return /^data:/i.test(value) ? value : `data:${mime};base64,${value}`;
 }
 
 export async function analyzeDocumentLocally(params: {
@@ -277,58 +256,49 @@ export async function analyzeDocumentLocally(params: {
   const { files, targetType, knownSuppliers = [], onProgress } = params;
   if (!files.length) throw new Error('لا توجد ملفات للتحليل المحلي');
 
-  let text = '';
-  const tables: any[] = [];
-  const ocrChunks: string[] = [];
+  let combinedText = '';
+  const rawRows: any[] = [];
   let totalPages = 0;
   let processedPages = 0;
 
-  for (const file of files) totalPages += file.pageImages?.length || (file.base64 && /image\//i.test(file.mimeType || '') ? 1 : 0);
-  totalPages = Math.max(totalPages, 1);
+  for (const file of files) {
+    totalPages += file.pageImages?.length || (file.base64 && /image\//i.test(file.mimeType || '') ? 1 : 0);
+    if (file.tableData?.length) rawRows.push(...file.tableData);
+    if (file.extractedText) combinedText += `\n--- ${file.name} ---\n${file.extractedText}`;
+  }
+  totalPages = Math.max(1, totalPages);
 
   for (let fileIndex = 0; fileIndex < files.length; fileIndex++) {
     const file = files[fileIndex];
-    const directText = normalizeText(file.extractedText || '');
-    if (directText) text += `\n--- ${file.name} ---\n${directText}\n`;
-    if (file.tableData?.length) tables.push(...file.tableData);
-
     const pages = file.pageImages?.length ? file.pageImages : (file.base64 && /image\//i.test(file.mimeType || '') ? [file.base64] : []);
-    const shouldOcr = pages.length > 0 && (file.type === 'image' || /image\//i.test(file.mimeType || '') || directText.length < 240 || file.type === 'pdf');
+    if (!pages.length) continue;
 
-    if (shouldOcr) {
-      const { ocrImageDataUrl } = await import('./localOcr');
-      for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
-        const prepared = await preprocessImage(asDataUrl(pages[pageIndex], file.mimeType || 'image/jpeg'));
-        const ocrText = normalizeText(await ocrImageDataUrl(prepared, progress => {
-          const pageProgress = Math.max(0, Math.min(100, progress)) / 100;
-          const overall = (processedPages + pageProgress) / totalPages;
-          onProgress?.(Math.min(88, 18 + Math.round(overall * 70)), `تحليل الصفحة ${pageIndex + 1} من ${pages.length} محلياً (${file.name})...`, 2);
-        }));
-        processedPages++;
-        if (ocrText) ocrChunks.push(`--- OCR محلي: ${file.name} / الصفحة ${pageIndex + 1} ---\n${ocrText}`);
-      }
+    const { ocrImageDataUrlWithLayout } = await import('./localOcr');
+    for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
+      onProgress?.(Math.min(34, 20 + Math.round(((processedPages + 0.05) / totalPages) * 14)), `تشغيل OCR المحلي للصفحة ${pageIndex + 1} من ${pages.length}...`, 2);
+      const prepared = await preprocessImage(asDataUrl(pages[pageIndex], file.mimeType || 'image/jpeg'));
+      const ocr = await ocrImageDataUrlWithLayout(prepared, progress => {
+        const pageProgress = Math.max(0, Math.min(100, progress)) / 100;
+        const overall = (processedPages + pageProgress) / totalPages;
+        onProgress?.(Math.min(88, 20 + Math.round(overall * 68)), `تحليل الصفحة ${pageIndex + 1} من ${pages.length} محلياً...`, 2);
+      });
+      const pageText = [ocr.text, ocr.layoutText].filter(Boolean).join('\n');
+      if (pageText) combinedText += `\n--- OCR محلي: ${file.name} / الصفحة ${pageIndex + 1} ---\n${pageText}`;
+      if (ocr.layoutText) rawRows.push(...ocr.layoutText.split('\n'));
+      else if (ocr.text) rawRows.push(...ocr.text.split('\n'));
+      processedPages++;
     }
-
-    onProgress?.(Math.min(88, 18 + Math.round(((fileIndex + 1) / files.length) * 18)), `تمت معالجة الملف ${fileIndex + 1} من ${files.length} محلياً`, 1);
+    onProgress?.(Math.min(88, 20 + Math.round(((fileIndex + 1) / files.length) * 18)), `تمت معالجة الملف ${fileIndex + 1} من ${files.length} محلياً`, 2);
   }
 
-  const combinedText = [text.trim(), ...ocrChunks].filter(Boolean).join('\n\n').trim();
-  const heuristicRows = detectItemRows(combinedText);
-  const allTableRows = tables.map(rowCells).filter(row => row.length > 0);
-  const candidateRows = dedupeRows([...allTableRows, ...heuristicRows]);
-
-  const mapped = mapTableDataToMedicineItems(
-    candidateRows.length ? candidateRows : undefined,
-    combinedText,
-  );
-  const items = validateAndSanitizeInvoiceItemList(mapped);
+  const rows = parseRows(rawRows);
+  const items = validateAndSanitizeInvoiceItemList(rows);
   const metadata = extractMetadata(combinedText, files.map(f => f.name), knownSuppliers);
   const totalAmount = items.reduce((sum: number, item: any) => sum + (Number(item.totalPrice) || 0), 0);
-  const confidenceSignals = [combinedText.length > 80, candidateRows.length > 0, items.length > 0, Boolean(metadata.documentNumber), Boolean(metadata.documentDate), Boolean(metadata.partyName)];
-  const confidence = Math.round((confidenceSignals.filter(Boolean).length / confidenceSignals.length) * 100);
+  const signals = [combinedText.length > 80, rows.length > 0, items.length > 0, Boolean(metadata.documentNumber), Boolean(metadata.documentDate), Boolean(metadata.partyName)];
+  const confidence = Math.round((signals.filter(Boolean).length / signals.length) * 100);
 
   onProgress?.(94, `اكتمل التحليل المحلي: ${items.length} صنفاً، موثوقية أولية ${confidence}%`, 3);
-
   return {
     detectedType: targetType,
     documentTitle: metadata.title,
@@ -339,7 +309,7 @@ export async function analyzeDocumentLocally(params: {
     totalAmount,
     items,
     confidence,
-    summary: `تحليل محلي متعدد المراحل: تم فحص النص والجداول والصور، وإعادة بناء البنية تلقائياً، واستخراج ${items.length} صنفاً دون إرسال الملف إلى Gemini.`,
-    rawText: combinedText,
+    summary: `تحليل محلي متعدد المراحل: تم تحليل النص وبنية الصفوف ومواقع الأعمدة، واستخراج ${items.length} صنفاً دون إرسال الملف إلى Gemini.`,
+    rawText: combinedText.trim(),
   };
 }
