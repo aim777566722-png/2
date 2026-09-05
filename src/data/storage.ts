@@ -59,8 +59,15 @@ function persistToIndexedDB(key: string, value: any, updatedAt = Date.now()) {
     try {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      store.put(value, key);
-      store.put(updatedAt, `${key}${UPDATED_AT_SUFFIX}`);
+      const timestampKey = `${key}${UPDATED_AT_SUFFIX}`;
+      const currentRequest = store.get(timestampKey);
+      currentRequest.onsuccess = () => {
+        const currentUpdatedAt = Number(currentRequest.result) || 0;
+        // An older asynchronous write must never overwrite a newer durable copy.
+        if (updatedAt < currentUpdatedAt) return;
+        store.put(value, key);
+        store.put(updatedAt, timestampKey);
+      };
     } catch (e) {
       console.warn('IDB write error:', e);
     }
