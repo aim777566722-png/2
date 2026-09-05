@@ -37,6 +37,12 @@ const DB_NAME = 'PharmacyPurchaseMate_HighCapacityDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'app_keyval';
 const UPDATED_AT_SUFFIX = '__updated_at_v1';
+let lastUpdatedAt = 0;
+
+function nextUpdatedAt() {
+  lastUpdatedAt = Math.max(Date.now(), lastUpdatedAt + 1);
+  return lastUpdatedAt;
+}
 
 function getIndexedDB(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
@@ -53,14 +59,21 @@ function getIndexedDB(): Promise<IDBDatabase | null> {
   });
 }
 
-function persistToIndexedDB(key: string, value: any, updatedAt = Date.now()) {
+function persistToIndexedDB(key: string, value: any, updatedAt = nextUpdatedAt()) {
   getIndexedDB().then(db => {
     if (!db) return;
     try {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      store.put(value, key);
-      store.put(updatedAt, `${key}${UPDATED_AT_SUFFIX}`);
+      const updatedAtKey = `${key}${UPDATED_AT_SUFFIX}`;
+      const currentUpdatedAt = store.get(updatedAtKey);
+      currentUpdatedAt.onsuccess = () => {
+        // Writes are dispatched asynchronously. Do not let an older write that
+        // reaches IndexedDB later replace a newer durable value.
+        if (Number(currentUpdatedAt.result) > updatedAt) return;
+        store.put(value, key);
+        store.put(updatedAt, updatedAtKey);
+      };
     } catch (e) {
       console.warn('IDB write error:', e);
     }
@@ -79,7 +92,7 @@ function readFromIndexedDB(key: string): Promise<any | undefined> {
 }
 
 function safeLocalStorageSet(key: string, value: any) {
-  const updatedAt = Date.now();
+  const updatedAt = nextUpdatedAt();
   try {
     localStorage.setItem(key, JSON.stringify(value));
     localStorage.setItem(`${key}${UPDATED_AT_SUFFIX}`, String(updatedAt));

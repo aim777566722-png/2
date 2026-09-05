@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { detectTable, extractItemsFromRows, normalizeOcrText } from '../src/services/localAnalysis';
+import { analyzeDocumentLocally, detectTable, extractItemsFromRows, normalizeOcrText } from '../src/services/localAnalysis';
 
 const rtl = [
   ['هاتف: 777777', 'مرتجع عدوان', '2026/09/01'],
@@ -29,4 +29,12 @@ assert.equal(english[1].unitPrice, 5, 'only mapped total/quantity may derive a m
 assert.deepEqual(extractItemsFromRows([['Phone', '123'], ['no table here']]), []);
 assert.equal(extractItemsFromRows([...ltr, ltr[1]]).length, 2, 'exact duplicate rows are removed');
 assert.equal(extractItemsFromRows([...ltr, ltr[0], ['90', 'Ibuprofen 400 mg', 'box', '1', '7.25', '7.25', '']]).length, 3, 'a repeated page header is skipped while the next page item is retained');
+assert.equal(extractItemsFromRows([...ltr, ['Page 1 of 2'], ['Printed by Pharmacy'], ['Continued'], ltr[0], ['90', 'Ibuprofen 400 mg', 'box', '1', '7.25', '7.25', '']]).length, 3, 'footer rows must not prevent parsing items on the next page');
+assert.equal(extractItemsFromRows([...ltr, ['Description', 'Qty', 'Amount', 'Unit'], ['Ibuprofen 400 mg', '1', '7.25', 'box']]).length, 3, 'a later page may use a differently ordered header');
+assert.equal(extractItemsFromRows([...ltr, ['90', 'Unpriced medicine', 'box', '', '', '10.00', '']]).length, 2, 'a total without a mapped quantity must not invent a unit price');
+const failedExtraction = await analyzeDocumentLocally({ files: [{ name: 'scan.jpg', extractedText: 'unstructured OCR output' }], targetType: 'invoice' });
+assert.deepEqual(failedExtraction.items, []);
+assert.equal(failedExtraction.totalAmount, 0);
+assert.equal(failedExtraction.documentNumber, '');
+assert.equal(failedExtraction.documentDate, '');
 console.log('localAnalysis tests passed');

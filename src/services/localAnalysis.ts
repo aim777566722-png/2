@@ -10,10 +10,12 @@ export const normalizeOcrText = (value: unknown) => String(value ?? '').replace(
 const compact = (value: unknown) => normalizeOcrText(value).toLowerCase().replace(/[\s:：._\-/]+/g, '');
 function numberOf(value: unknown): number | null { if (typeof value === 'number') return Number.isFinite(value) ? value : null; let s = normalizeOcrText(value).replace(/[٬،]/g, ',').replace(/\s/g, '').replace(/[^0-9.,+-]/g, ''); if (!s) return null; const comma = s.lastIndexOf(','), dot = s.lastIndexOf('.'); if (comma >= 0 && dot >= 0) s = comma > dot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, ''); else if (comma >= 0) s = /,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, ''); const n = Number(s); return Number.isFinite(n) ? n : null; }
 function isNumeric(value: string) { return numberOf(value) !== null && /^[\d٠-٩۰-۹.,٬،+\-\s]+$/.test(value); }
-function isDate(value: string) { const s = normalizeOcrText(value); return /^(?:20\d{2}[/.-]\d{1,2}(?:[/.-]\d{1,2})?|\d{1,2}[/.-]\d{1,2}[/.-](?:20)?\d{2}|\d{1,2}[/.-](?:20)?\d{2})$/.test(s); }
-function cells(row: unknown): string[] { if (Array.isArray(row)) return row.map(normalizeOcrText).filter(Boolean); if (row && typeof row === 'object') return Object.values(row).map(normalizeOcrText).filter(Boolean); const text = String(row ?? ''); return (text.includes('|') ? text.split(/\s*\|\s*/) : text.includes('\t') ? text.split(/\t+/) : text.split(/\s{2,}/)).map(normalizeOcrText).filter(Boolean); }
+function isDate(value: string) { const s = normalizeOcrText(value); return /^(?:20\d{2}[/.-]\d{1,2}(?:[/.-]\d{1,2})?|\d{1,2}[/.-]\d{1,2}[/.-]20\d{2}|\d{1,2}[/-](?:20)?\d{2})$/.test(s); }
+// Preserve empty cells: removing them shifts every column after an OCR omission.
+function cells(row: unknown): string[] { if (Array.isArray(row)) return row.map(normalizeOcrText); if (row && typeof row === 'object') return Object.values(row).map(normalizeOcrText); const text = String(row ?? ''); return (text.includes('|') ? text.split(/\s*\|\s*/) : text.includes('\t') ? text.split(/\t+/) : text.split(/\s{2,}/)).map(normalizeOcrText); }
 function field(value: string): Field | undefined { const s = compact(value); if (/^(اسمالصنف|اسمالدواء|الصنف|الدواء|البيان|الوصف|المستحضر|itemname|medicine|product|description)$/.test(s)) return 'name'; if (/^(الوحدة|وحدة|unit|units)$/.test(s)) return 'unit'; if (/^(الكمية|كمية|عدد|qty|quantity)$/.test(s)) return 'quantity'; if (/^(بونص|bonus|هدية)$/.test(s)) return 'bonus'; if (/^(السعر|سعر|price|unitprice|rate)$/.test(s)) return 'price'; if (/^(رقمالصنف|كودالصنف|كود|باركود|barcode|code|itemno)$/.test(s)) return 'code'; if (/^(تاريخالانتهاء|تاريخالصلاحية|الصلاحية|انتهاء|expiry|expiration|exp)$/.test(s)) return 'expiry'; if (/^(القيمة|الإجمالي|اجمالي|المجموع|total|amount|value)$/.test(s)) return 'total'; if (/^(م|تسلسل|التسلسل|no|serial|#)$/.test(s)) return 'serial'; }
-export function detectTable(rows: unknown[]): { headerIndex: number; schema: Schema } | null { const all = rows.map(cells); for (let i = 0; i < all.length; i++) { const schema: Schema = {}; all[i].forEach((cell, index) => { const key = field(cell); if (key !== undefined && schema[key] === undefined) schema[key] = index; }); const keys = Object.keys(schema).length; if (schema.name !== undefined && keys >= 3 && (schema.price !== undefined || schema.total !== undefined || schema.quantity !== undefined)) return { headerIndex: i, schema }; } return null; }
+function schemaForHeader(row: string[]): Schema | null { const schema: Schema = {}; row.forEach((cell, index) => { const key = field(cell); if (key !== undefined && schema[key] === undefined) schema[key] = index; }); const keys = Object.keys(schema).length; return schema.name !== undefined && keys >= 3 && (schema.price !== undefined || schema.total !== undefined || schema.quantity !== undefined) ? schema : null; }
+export function detectTable(rows: unknown[]): { headerIndex: number; schema: Schema } | null { const all = rows.map(cells); for (let i = 0; i < all.length; i++) { const schema = schemaForHeader(all[i]); if (schema) return { headerIndex: i, schema }; } return null; }
 function isJunkName(value: string) { const s = normalizeOcrText(value); return s.length < 2 || isNumeric(s) || isDate(s) || !/[A-Za-z\u0600-\u06FF]/.test(s) || /(?:address|phone|invoice|customer|printed|subtotal|grand total|العنوان|هاتف|رقم الفاتورة|العميل|التاريخ|ملاحظات|الإجمالي|المجموع|طباعة|مدخل البيانات)/i.test(s); }
 function cleanName(value: string, schema: Schema, row: string[]) { let name = normalizeOcrText(value).replace(/^\d{3,16}\s+/, '').trim(); for (const key of ['code', 'serial', 'expiry', 'price', 'total', 'quantity'] as Field[]) { const index = schema[key]; const cell = index !== undefined ? row[index] : undefined; if (index !== undefined && index !== schema.name && cell) { const escaped = cell.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); name = name.replace(new RegExp(`\\b${escaped}\\b`, 'g'), ' '); } } return name.replace(/\s+/g, ' ').trim(); }
 function unit(value: string | undefined) { const v = normalizeOcrText(value); return /^(كيس|علبة|علب|باكت|شريط|كرتون|حبة|حبات|قرص|كبسول(?:ة|ات)?|امبول|أمبول|فيال|تيوب|قطعة|وحدة|قارورة|tab|tabs|cap|caps|vial|amp|box)$/i.test(v) ? v : ''; }
@@ -21,18 +23,22 @@ function valueAt(row: string[], index: number | undefined, positive = false): nu
 function parseTableRow(row: string[], schema: Schema): ParsedItem | null {
   const nameValue = schema.name === undefined ? '' : cleanName(row[schema.name] || '', schema, row);
   if (isJunkName(nameValue)) return null;
-  const quantity = valueAt(row, schema.quantity, true) ?? 1;
+  const listedQuantity = valueAt(row, schema.quantity, true);
+  const quantity = listedQuantity ?? 1;
   const listedPrice = valueAt(row, schema.price, true);
   const total = valueAt(row, schema.total, true);
-  const price = listedPrice ?? (total !== null && schema.quantity !== undefined && quantity > 0 ? total / quantity : null);
+  // A total cannot safely become a unit price unless the row explicitly supplied a quantity.
+  const price = listedPrice ?? (total !== null && listedQuantity !== null ? total / listedQuantity : null);
   if (price === null) return null;
   return { id: `local-${Date.now()}-${itemCounter++}`, itemName: nameValue, quantity, unit: unit(schema.unit === undefined ? undefined : row[schema.unit]) || 'علبة', unitPrice: price, totalPrice: total ?? price * quantity, bonusScheme: '', discountPercent: 0, notes: '', expiryDate: schema.expiry !== undefined && isDate(row[schema.expiry] || '') ? row[schema.expiry] : undefined, rawText: row.join(' | ') };
 }
 export function extractItemsFromRows(rows: unknown[]): ParsedItem[] {
   const table = detectTable(rows); if (!table) return [];
-  const all = rows.map(cells); const result: ParsedItem[] = []; const seen = new Set<string>(); let misses = 0;
-  for (let i = table.headerIndex + 1; i < all.length; i++) { const row = all[i]; if (!row.length) continue; if (row.some(c => field(c) === 'name') && row.some(c => field(c) === 'price' || field(c) === 'total')) { misses = 0; continue; }
-    const item = parseTableRow(row, table.schema); if (!item) { if (++misses >= 3) break; continue; } misses = 0;
+  const all = rows.map(cells); const result: ParsedItem[] = []; const seen = new Set<string>(); let schema = table.schema;
+  for (let i = table.headerIndex + 1; i < all.length; i++) { const row = all[i]; if (!row.some(Boolean)) continue; const nextSchema = schemaForHeader(row); if (nextSchema) { schema = nextSchema; continue; }
+    // A page footer can contain several non-item rows before the next page's header.
+    // Keep scanning so that items on later pages are not silently discarded.
+    const item = parseTableRow(row, schema); if (!item) continue;
     const key = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`; if (!seen.has(key)) { seen.add(key); result.push(item); }
   } return result;
 }
