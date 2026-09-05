@@ -19,7 +19,10 @@ function cleanName(value: string, schema: Schema, row: string[]) { let name = no
 function unit(value: string | undefined) { const v = normalizeOcrText(value); return /^(كيس|علبة|علب|باكت|شريط|كرتون|حبة|حبات|قرص|كبسول(?:ة|ات)?|امبول|أمبول|فيال|تيوب|قطعة|وحدة|قارورة|tab|tabs|cap|caps|vial|amp|box)$/i.test(v) ? v : ''; }
 function valueAt(row: string[], index: number | undefined, positive = false): number | null { if (index === undefined || isDate(row[index] || '')) return null; const value = numberOf(row[index]); return value !== null && (!positive || value > 0) ? value : null; }
 function parseTableRow(row: string[], schema: Schema): ParsedItem | null {
-  const nameValue = schema.name === undefined ? '' : cleanName(row[schema.name] || '', schema, row);
+  const nameCell = schema.name === undefined ? '' : row[schema.name];
+  // A footer or truncated OCR row may not contain every schema column. Reject it before cleanName can touch absent cells.
+  if (!nameCell) return null;
+  const nameValue = cleanName(nameCell, schema, row);
   if (isJunkName(nameValue)) return null;
   const quantity = valueAt(row, schema.quantity, true) ?? 1;
   const listedPrice = valueAt(row, schema.price, true);
