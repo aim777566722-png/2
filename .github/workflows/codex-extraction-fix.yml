@@ -16,18 +16,10 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-
           p = Path('src/utils/documentParser.ts')
           s = p.read_text()
           anchor = "function isHeaderOrJunk(name: string): boolean {"
-          helper = r'''function isOcrNoiseLike(val: any): boolean {
-            const s = String(val ?? '').trim();
-            if (!s) return true;
-            if (/^\d{1,2}\s*\/\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|ص|م)?$/i.test(s)) return true;
-            if (/^(?:https?:\/\/|www\.|(?:www\s*[.]\s*)?\w+[.]\w{2,})(?:[/?#].*)?$/i.test(s)) return true;
-            if (/^(?:www|http|https|ftp|com|net|org)$/i.test(s)) return true;
-            return false;
-          }
+          helper = "function isOcrNoiseLike(val: any): boolean {\n  const s = String(val ?? '').trim();\n  if (!s) return true;\n  if (/^\\d{1,2}\\s*\\/\\s*\\d{1,2}:\\d{2}(?::\\d{2})?\\s*(?:am|pm|ص|م)?$/i.test(s)) return true;\n  if (/^(?:https?:\\/\\/|www\\.|(?:www\\s*[.]\\s*)?\\w+[.]\\w{2,})(?:[/?#].*)?$/i.test(s)) return true;\n  if (/^(?:www|http|https|ftp|com|net|org)$/i.test(s)) return true;\n  return false;\n}\n\n"
           if 'function isOcrNoiseLike' not in s:
               if anchor not in s: raise SystemExit('parser anchor not found')
               s = s.replace(anchor, helper + anchor, 1)
@@ -45,25 +37,8 @@ jobs:
 
           p = Path('src/context/BackgroundAnalysisContext.tsx')
           s = p.read_text()
-          old = """        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {
-          extracted.items = fullExtractedTableRows;
-          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;
-        } else {
-          extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;
-        }
-"""
-          new = """        if (analysisMode === 'local') {
-          extracted.items = validatedExtractedItems;
-          if (validatedExtractedItems.length === 0) {
-            extracted.summary = 'لم يتم العثور على صفوف دوائية موثوقة في التحليل المحلي؛ لم يتم استبدال النتيجة ببيانات OCR غير موثوقة.';
-          }
-        } else if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {
-          extracted.items = fullExtractedTableRows;
-          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;
-        } else {
-          extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;
-        }
-"""
+          old = "        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {\n          extracted.items = fullExtractedTableRows;\n          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;\n        } else {\n          extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;\n        }"
+          new = "        if (analysisMode === 'local') {\n          extracted.items = validatedExtractedItems;\n          if (validatedExtractedItems.length === 0) {\n            extracted.summary = 'لم يتم العثور على صفوف دوائية موثوقة في التحليل المحلي؛ لم يتم استبدال النتيجة ببيانات OCR غير موثوقة.';\n          }\n        } else if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {\n          extracted.items = fullExtractedTableRows;\n          extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;\n        } else {\n          extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;\n        }"
           if old not in s: raise SystemExit('background extraction fallback block not found')
           p.write_text(s.replace(old, new, 1))
       - name: Commit and push
