@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: [ main, master, android-build ]
+    branches: [ main, master, android-build, 'codex/**' ]
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
@@ -80,4 +80,4 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-# Trigger a fresh APK build for the latest Apps Script routing changes.
+# Trigger APK builds for the protected development branches as well as the Codex branches.

@@ -6,7 +6,8 @@ const config: CapacitorConfig = {
   webDir: 'dist',
   server: {
     androidScheme: 'https',
-    cleartext: true
+    // All configured API endpoints are HTTPS; do not permit clear-text traffic.
+    cleartext: false
   },
   plugins: {
     CapacitorHttp: {

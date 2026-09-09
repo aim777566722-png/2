@@ -24,7 +24,6 @@ const STORAGE_KEYS = {
   ACTIVE_TASK: 'pharmacy_purchasemate_active_task_v1'
 };
 
-// In-memory hot cache for instant O(1) synchronous reactivity
 const memoryCache: {
   medicines?: Medicine[];
   suppliers?: Supplier[];
@@ -34,10 +33,10 @@ const memoryCache: {
   reconciliations?: OrderInvoiceReconciliation[];
 } = {};
 
-// Simple Native IndexedDB Helper for high datasets (30,000+ items / 50MB+)
 const DB_NAME = 'PharmacyPurchaseMate_HighCapacityDB';
 const DB_VERSION = 1;
 const STORE_NAME = 'app_keyval';
+const UPDATED_AT_SUFFIX = '__updated_at_v1';
 
 function getIndexedDB(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return Promise.resolve(null);
@@ -46,44 +45,93 @@ function getIndexedDB(): Promise<IDBDatabase | null> {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         const db = request.result;
-        if (!db.objectStoreNames.contains(STORE_NAME)) {
-          db.createObjectStore(STORE_NAME);
-        }
+        if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME);
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => resolve(null);
-    } catch {
-      resolve(null);
-    }
+    } catch { resolve(null); }
   });
 }
 
-function persistToIndexedDB(key: string, value: any) {
+function persistToIndexedDB(key: string, value: any, updatedAt = Date.now()) {
   getIndexedDB().then(db => {
     if (!db) return;
     try {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
-      store.put(value, key);
+      const timestampKey = `${key}${UPDATED_AT_SUFFIX}`;
+      const currentRequest = store.get(timestampKey);
+      currentRequest.onsuccess = () => {
+        const currentUpdatedAt = Number(currentRequest.result) || 0;
+        // An older asynchronous write must never overwrite a newer durable copy.
+        if (updatedAt < currentUpdatedAt) return;
+        store.put(value, key);
+        store.put(updatedAt, timestampKey);
+      };
     } catch (e) {
       console.warn('IDB write error:', e);
     }
   });
 }
 
+function readFromIndexedDB(key: string): Promise<any | undefined> {
+  return getIndexedDB().then(db => new Promise(resolve => {
+    if (!db) return resolve(undefined);
+    try {
+      const request = db.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(key);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => resolve(undefined);
+    } catch { resolve(undefined); }
+  }));
+}
+
 function safeLocalStorageSet(key: string, value: any) {
+  const updatedAt = Date.now();
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(`${key}${UPDATED_AT_SUFFIX}`, String(updatedAt));
   } catch (err) {
-    // If QuotaExceededError happens when storing 30,000+ items,
-    // fallback gracefully to IndexedDB while maintaining in-memory cache!
     console.warn(`LocalStorage quota exceeded for ${key}. Falling back to IndexedDB persistent storage.`);
   }
-  // Always persist to IndexedDB in parallel for durability
-  persistToIndexedDB(key, value);
+  persistToIndexedDB(key, value, updatedAt);
 }
 
 export const Storage = {
+  async hydrate(): Promise<void> {
+    const collections: Array<[keyof typeof STORAGE_KEYS, keyof typeof memoryCache]> = [
+      ['MEDICINES', 'medicines'], ['SUPPLIERS', 'suppliers'], ['MARKET_PRICES', 'marketPrices'],
+      ['ORDERS', 'orders'], ['INVOICES', 'invoices'], ['RECONCILIATIONS', 'reconciliations'],
+    ];
+    await Promise.all(collections.map(async ([keyName, cacheKey]) => {
+      const key = STORAGE_KEYS[keyName];
+      let localValue: any = undefined;
+      let localUpdatedAt = 0;
+      try {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          try { localValue = JSON.parse(raw); } catch { localValue = undefined; }
+          localUpdatedAt = Number(localStorage.getItem(`${key}${UPDATED_AT_SUFFIX}`)) || 0;
+        }
+      } catch { /* IndexedDB-only mode */ }
+
+      const idbValue = await readFromIndexedDB(key);
+      const idbUpdatedAt = Number(await readFromIndexedDB(`${key}${UPDATED_AT_SUFFIX}`)) || 0;
+      const localIsValid = Array.isArray(localValue);
+      const idbIsValid = Array.isArray(idbValue);
+
+      // Prefer the durable copy only when it is newer, or when localStorage is missing/invalid.
+      if (idbIsValid && (!localIsValid || idbUpdatedAt > localUpdatedAt)) {
+        (memoryCache as any)[cacheKey] = idbValue;
+        try {
+          localStorage.setItem(key, JSON.stringify(idbValue));
+          localStorage.setItem(`${key}${UPDATED_AT_SUFFIX}`, String(idbUpdatedAt || Date.now()));
+        } catch { /* quota-limited; memory cache remains authoritative */ }
+        return;
+      }
+
+      if (localIsValid) (memoryCache as any)[cacheKey] = localValue;
+    }));
+  },
   getMedicines(): Medicine[] {
     if (memoryCache.medicines) return memoryCache.medicines;
     try {
@@ -116,14 +164,8 @@ export const Storage = {
       const existing = list[existingIndex];
       const mergedAliases = Array.from(new Set([...(existing.aliases || []), ...(medicine.aliases || [])]));
       updated = [...list];
-      updated[existingIndex] = {
-        ...existing,
-        ...medicine,
-        aliases: mergedAliases
-      };
-    } else {
-      updated = [medicine, ...list];
-    }
+      updated[existingIndex] = { ...existing, ...medicine, aliases: mergedAliases };
+    } else updated = [medicine, ...list];
     this.saveMedicines(updated);
     return updated;
   },
@@ -132,22 +174,14 @@ export const Storage = {
     const list = this.getMedicines();
     const cleanAlias = String(aliasName || '').trim();
     if (!cleanAlias) return list;
-
     const index = list.findIndex(m => (medicineId && m.id === medicineId) || (m.name && m.name.trim().toLowerCase() === cleanAlias.toLowerCase()));
     if (index >= 0) {
       const med = list[index];
       const existingAliases = Array.isArray(med.aliases) ? med.aliases : [];
-      const alreadyHas = existingAliases.some(a => a.trim().toLowerCase() === cleanAlias.toLowerCase()) || 
-                         med.name.trim().toLowerCase() === cleanAlias.toLowerCase();
+      const alreadyHas = existingAliases.some(a => a.trim().toLowerCase() === cleanAlias.toLowerCase()) || med.name.trim().toLowerCase() === cleanAlias.toLowerCase();
       if (!alreadyHas) {
-        const updatedMed: Medicine = {
-          ...med,
-          aliases: [...existingAliases, cleanAlias]
-        };
-        const updated = [...list];
-        updated[index] = updatedMed;
-        this.saveMedicines(updated);
-        return updated;
+        const updatedMed: Medicine = { ...med, aliases: [...existingAliases, cleanAlias] };
+        const updated = [...list]; updated[index] = updatedMed; this.saveMedicines(updated); return updated;
       }
     }
     return list;
@@ -157,354 +191,117 @@ export const Storage = {
     if (memoryCache.suppliers) return memoryCache.suppliers;
     try {
       const data = localStorage.getItem(STORAGE_KEYS.SUPPLIERS);
-      if (!data) {
-        safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS);
-        memoryCache.suppliers = INITIAL_SUPPLIERS;
-        return INITIAL_SUPPLIERS;
-      }
-      const parsed = JSON.parse(data);
-      memoryCache.suppliers = Array.isArray(parsed) ? parsed : INITIAL_SUPPLIERS;
-      return memoryCache.suppliers;
-    } catch {
-      memoryCache.suppliers = INITIAL_SUPPLIERS;
-      return INITIAL_SUPPLIERS;
-    }
+      if (!data) { safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS); memoryCache.suppliers = INITIAL_SUPPLIERS; return INITIAL_SUPPLIERS; }
+      const parsed = JSON.parse(data); memoryCache.suppliers = Array.isArray(parsed) ? parsed : INITIAL_SUPPLIERS; return memoryCache.suppliers;
+    } catch { memoryCache.suppliers = INITIAL_SUPPLIERS; return INITIAL_SUPPLIERS; }
   },
 
-  saveSuppliers(suppliers: Supplier[]) {
-    memoryCache.suppliers = suppliers;
-    safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, suppliers);
-  },
+  saveSuppliers(suppliers: Supplier[]) { memoryCache.suppliers = suppliers; safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, suppliers); },
 
   addSupplier(supplier: Supplier): Supplier[] {
     const list = this.getSuppliers();
     const supNameClean = String(supplier.name || '').trim().toLowerCase();
     const existingIndex = list.findIndex(s => (supplier.id && s.id === supplier.id) || (supNameClean && String(s.name || '').trim().toLowerCase() === supNameClean));
-    let updated: Supplier[];
-    if (existingIndex >= 0) {
-      updated = [...list];
-      updated[existingIndex] = supplier;
-    } else {
-      updated = [supplier, ...list];
-    }
-    this.saveSuppliers(updated);
-    return updated;
+    const updated = existingIndex >= 0 ? [...list] : [supplier, ...list];
+    if (existingIndex >= 0) updated[existingIndex] = supplier;
+    this.saveSuppliers(updated); return updated;
   },
 
   getMarketPrices(): MarketPriceRecord[] {
     if (memoryCache.marketPrices) return memoryCache.marketPrices;
     try {
       const data = localStorage.getItem(STORAGE_KEYS.MARKET_PRICES);
-      if (!data) {
-        safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES);
-        memoryCache.marketPrices = INITIAL_MARKET_PRICES;
-        return INITIAL_MARKET_PRICES;
-      }
-      const parsed = JSON.parse(data);
-      memoryCache.marketPrices = Array.isArray(parsed) ? parsed : INITIAL_MARKET_PRICES;
-      return memoryCache.marketPrices;
-    } catch {
-      memoryCache.marketPrices = INITIAL_MARKET_PRICES;
-      return INITIAL_MARKET_PRICES;
-    }
+      if (!data) { safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES); memoryCache.marketPrices = INITIAL_MARKET_PRICES; return INITIAL_MARKET_PRICES; }
+      const parsed = JSON.parse(data); memoryCache.marketPrices = Array.isArray(parsed) ? parsed : INITIAL_MARKET_PRICES; return memoryCache.marketPrices;
+    } catch { memoryCache.marketPrices = INITIAL_MARKET_PRICES; return INITIAL_MARKET_PRICES; }
   },
 
-  saveMarketPrices(prices: MarketPriceRecord[]) {
-    memoryCache.marketPrices = prices;
-    safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, prices);
-  },
+  saveMarketPrices(prices: MarketPriceRecord[]) { memoryCache.marketPrices = prices; safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, prices); },
 
-  addMarketPrice(record: MarketPriceRecord): MarketPriceRecord[] {
-    const list = this.getMarketPrices();
-    const updated = [record, ...list];
-    this.saveMarketPrices(updated);
-    return updated;
-  },
+  addMarketPrice(record: MarketPriceRecord): MarketPriceRecord[] { const list = this.getMarketPrices(); const updated = [record, ...list]; this.saveMarketPrices(updated); return updated; },
 
-  deleteMarketPrice(recordId: string): MarketPriceRecord[] {
-    const list = this.getMarketPrices();
-    const updated = list.filter(r => r.id !== recordId);
-    this.saveMarketPrices(updated);
-    return updated;
-  },
+  deleteMarketPrice(recordId: string): MarketPriceRecord[] { const list = this.getMarketPrices(); const updated = list.filter(r => r.id !== recordId); this.saveMarketPrices(updated); return updated; },
 
   deleteMarketPricesForMedicine(medicineId: string, medicineName?: string): MarketPriceRecord[] {
-    const list = this.getMarketPrices();
-    const medIdClean = String(medicineId || '').trim();
-    const medNameClean = String(medicineName || '').trim().toLowerCase();
-    
-    const updated = list.filter(r => {
-      if (medIdClean && r.medicineId === medIdClean) return false;
-      if (medNameClean && String(r.medicineName || '').trim().toLowerCase() === medNameClean) return false;
-      return true;
-    });
-    this.saveMarketPrices(updated);
-    return updated;
+    const list = this.getMarketPrices(); const medIdClean = String(medicineId || '').trim(); const medNameClean = String(medicineName || '').trim().toLowerCase();
+    const updated = list.filter(r => { if (medIdClean && r.medicineId === medIdClean) return false; if (medNameClean && String(r.medicineName || '').trim().toLowerCase() === medNameClean) return false; return true; });
+    this.saveMarketPrices(updated); return updated;
   },
 
   deduplicateMarketPricesForMedicine(medicineId: string, medicineName?: string): MarketPriceRecord[] {
-    const list = this.getMarketPrices();
-    const medIdClean = String(medicineId || '').trim();
-    const medNameClean = String(medicineName || '').trim().toLowerCase();
-
-    const seen = new Set<string>();
-    const updated: MarketPriceRecord[] = [];
-
+    const list = this.getMarketPrices(); const medIdClean = String(medicineId || '').trim(); const medNameClean = String(medicineName || '').trim().toLowerCase();
+    const seen = new Set<string>(); const updated: MarketPriceRecord[] = [];
     for (const r of list) {
-      const isTarget = (medIdClean && r.medicineId === medIdClean) ||
-                       (medNameClean && String(r.medicineName || '').trim().toLowerCase() === medNameClean);
-      if (isTarget) {
-        // Key based on supplier, price, date, bonus
-        const key = `${r.supplierName.trim().toLowerCase()}_${r.unitPrice}_${r.invoiceDate || ''}_${r.bonusScheme || ''}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          updated.push(r);
-        }
-      } else {
-        updated.push(r);
-      }
+      const isTarget = (medIdClean && r.medicineId === medIdClean) || (medNameClean && String(r.medicineName || '').trim().toLowerCase() === medNameClean);
+      if (isTarget) { const key = `${r.supplierName.trim().toLowerCase()}_${r.unitPrice}_${r.invoiceDate || ''}_${r.bonusScheme || ''}`; if (!seen.has(key)) { seen.add(key); updated.push(r); } }
+      else updated.push(r);
     }
-
-    this.saveMarketPrices(updated);
-    return updated;
+    this.saveMarketPrices(updated); return updated;
   },
 
   addPricesFromInvoice(invoice: PurchaseInvoice): MarketPriceRecord[] {
-    const currentPrices = this.getMarketPrices();
-    if (!invoice || !Array.isArray(invoice.items)) return currentPrices;
-
-    const newRecords: MarketPriceRecord[] = invoice.items
-      .filter(item => item)
-      .map(item => {
-        const rawName = item.itemName || (item as any).medicineName || 'صنف غير محدد';
-        const safeName = String(rawName).trim();
-        const safeIdPart = safeName.replace(/\s+/g, '-').toLowerCase();
-
-        return {
-          id: `price-inv-${invoice.id || Date.now()}-${item.id || Math.random().toString(36).slice(2, 7)}`,
-          medicineId: item.matchedMedicineId || `med-${safeIdPart}`,
-          medicineName: safeName,
-          supplierId: invoice.supplierId || 'sup-1',
-          supplierName: invoice.supplierName || 'مورد عام',
-          unitPrice: Number(item.unitPrice ?? (item as any).purchaseUnitPrice ?? 0) || 0,
-          invoiceDate: invoice.invoiceDate || new Date().toISOString().split('T')[0],
-          invoiceNumber: invoice.invoiceNumber || 'INV-0',
-          bonusScheme: item.bonusScheme || '',
-          discountPercent: Number(item.discountPercent) || 0,
-          notes: `مسجل من الفاتورة رقم ${invoice.invoiceNumber || ''}`,
-          createdTimestamp: Date.now()
-        };
-      });
-
-    const updated = [...newRecords, ...currentPrices];
-    this.saveMarketPrices(updated);
-    return updated;
+    const currentPrices = this.getMarketPrices(); if (!invoice || !Array.isArray(invoice.items)) return currentPrices;
+    const newRecords: MarketPriceRecord[] = invoice.items.filter(item => item).map(item => {
+      const rawName = item.itemName || (item as any).medicineName || 'صنف غير محدد'; const safeName = String(rawName).trim(); const safeIdPart = safeName.replace(/\s+/g, '-').toLowerCase();
+      return { id: `price-inv-${invoice.id || Date.now()}-${item.id || Math.random().toString(36).slice(2, 7)}`, medicineId: item.matchedMedicineId || `med-${safeIdPart}`, medicineName: safeName, supplierId: invoice.supplierId || 'sup-1', supplierName: invoice.supplierName || 'مورد عام', unitPrice: Number(item.unitPrice ?? (item as any).purchaseUnitPrice ?? 0) || 0, invoiceDate: invoice.invoiceDate || new Date().toISOString().split('T')[0], invoiceNumber: invoice.invoiceNumber || 'INV-0', bonusScheme: item.bonusScheme || '', discountPercent: Number(item.discountPercent) || 0, notes: `مسجل من الفاتورة رقم ${invoice.invoiceNumber || ''}`, createdTimestamp: Date.now() };
+    });
+    const updated = [...newRecords, ...currentPrices]; this.saveMarketPrices(updated); return updated;
   },
 
   getOrders(): PharmacyOrder[] {
     if (memoryCache.orders) return memoryCache.orders;
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.ORDERS);
-      if (!data) {
-        safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS);
-        memoryCache.orders = INITIAL_ORDERS;
-        return INITIAL_ORDERS;
-      }
-      const parsed = JSON.parse(data);
-      memoryCache.orders = Array.isArray(parsed) ? parsed : INITIAL_ORDERS;
-      return memoryCache.orders;
-    } catch {
-      memoryCache.orders = INITIAL_ORDERS;
-      return INITIAL_ORDERS;
-    }
+    try { const data = localStorage.getItem(STORAGE_KEYS.ORDERS); if (!data) { safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS); memoryCache.orders = INITIAL_ORDERS; return INITIAL_ORDERS; } const parsed = JSON.parse(data); memoryCache.orders = Array.isArray(parsed) ? parsed : INITIAL_ORDERS; return memoryCache.orders; }
+    catch { memoryCache.orders = INITIAL_ORDERS; return INITIAL_ORDERS; }
   },
 
-  saveOrders(orders: PharmacyOrder[]) {
-    memoryCache.orders = orders;
-    safeLocalStorageSet(STORAGE_KEYS.ORDERS, orders);
-  },
+  saveOrders(orders: PharmacyOrder[]) { memoryCache.orders = orders; safeLocalStorageSet(STORAGE_KEYS.ORDERS, orders); },
 
-  saveOrder(order: PharmacyOrder): PharmacyOrder[] {
-    const list = this.getOrders();
-    const index = list.findIndex(o => o.id === order.id);
-    let updated: PharmacyOrder[];
-    if (index >= 0) {
-      updated = [...list];
-      updated[index] = order;
-    } else {
-      updated = [order, ...list];
-    }
-    this.saveOrders(updated);
-    return updated;
-  },
+  saveOrder(order: PharmacyOrder): PharmacyOrder[] { const list = this.getOrders(); const index = list.findIndex(o => o.id === order.id); const updated = [...list]; if (index >= 0) updated[index] = order; else updated.unshift(order); this.saveOrders(updated); return updated; },
 
   getInvoices(): PurchaseInvoice[] {
     if (memoryCache.invoices) return memoryCache.invoices;
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.INVOICES);
-      if (!data) {
-        safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
-        memoryCache.invoices = INITIAL_INVOICES;
-        return INITIAL_INVOICES;
-      }
-      const parsed = JSON.parse(data);
-      memoryCache.invoices = Array.isArray(parsed) ? parsed : INITIAL_INVOICES;
-      return memoryCache.invoices;
-    } catch {
-      memoryCache.invoices = INITIAL_INVOICES;
-      return INITIAL_INVOICES;
-    }
+    try { const data = localStorage.getItem(STORAGE_KEYS.INVOICES); if (!data) { safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES); memoryCache.invoices = INITIAL_INVOICES; return INITIAL_INVOICES; } const parsed = JSON.parse(data); memoryCache.invoices = Array.isArray(parsed) ? parsed : INITIAL_INVOICES; return memoryCache.invoices; }
+    catch { memoryCache.invoices = INITIAL_INVOICES; return INITIAL_INVOICES; }
   },
 
-  saveInvoices(invoices: PurchaseInvoice[]) {
-    memoryCache.invoices = invoices;
-    safeLocalStorageSet(STORAGE_KEYS.INVOICES, invoices);
-  },
+  saveInvoices(invoices: PurchaseInvoice[]) { memoryCache.invoices = invoices; safeLocalStorageSet(STORAGE_KEYS.INVOICES, invoices); },
 
-  saveInvoice(invoice: PurchaseInvoice): PurchaseInvoice[] {
-    const list = this.getInvoices();
-    const index = list.findIndex(i => i.id === invoice.id);
-    let updated: PurchaseInvoice[];
-    if (index >= 0) {
-      updated = [...list];
-      updated[index] = invoice;
-    } else {
-      updated = [invoice, ...list];
-    }
-    this.saveInvoices(updated);
-    this.addPricesFromInvoice(invoice);
-    return updated;
-  },
+  saveInvoice(invoice: PurchaseInvoice): PurchaseInvoice[] { const list = this.getInvoices(); const index = list.findIndex(i => i.id === invoice.id); const updated = [...list]; if (index >= 0) updated[index] = invoice; else updated.unshift(invoice); this.saveInvoices(updated); this.addPricesFromInvoice(invoice); return updated; },
 
   getReconciliations(): OrderInvoiceReconciliation[] {
     if (memoryCache.reconciliations) return memoryCache.reconciliations;
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.RECONCILIATIONS);
-      const parsed = data ? JSON.parse(data) : [];
-      memoryCache.reconciliations = Array.isArray(parsed) ? parsed : [];
-      return memoryCache.reconciliations;
-    } catch {
-      memoryCache.reconciliations = [];
-      return [];
-    }
+    try { const data = localStorage.getItem(STORAGE_KEYS.RECONCILIATIONS); const parsed = data ? JSON.parse(data) : []; memoryCache.reconciliations = Array.isArray(parsed) ? parsed : []; return memoryCache.reconciliations; }
+    catch { memoryCache.reconciliations = []; return []; }
   },
 
-  saveReconciliation(rec: OrderInvoiceReconciliation): OrderInvoiceReconciliation[] {
-    const list = this.getReconciliations();
-    const index = list.findIndex(r => r.id === rec.id);
-    let updated: OrderInvoiceReconciliation[];
-    if (index >= 0) {
-      updated = [...list];
-      updated[index] = rec;
-    } else {
-      updated = [rec, ...list];
-    }
-    memoryCache.reconciliations = updated;
-    safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, updated);
-    return updated;
-  },
+  saveReconciliation(rec: OrderInvoiceReconciliation): OrderInvoiceReconciliation[] { const list = this.getReconciliations(); const index = list.findIndex(r => r.id === rec.id); const updated = [...list]; if (index >= 0) updated[index] = rec; else updated.unshift(rec); memoryCache.reconciliations = updated; safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, updated); return updated; },
 
-  getActiveTask(): any | null {
-    try {
-      const data = localStorage.getItem(STORAGE_KEYS.ACTIVE_TASK);
-      return data ? JSON.parse(data) : null;
-    } catch {
-      return null;
-    }
-  },
+  getActiveTask(): any | null { try { const data = localStorage.getItem(STORAGE_KEYS.ACTIVE_TASK); return data ? JSON.parse(data) : null; } catch { return null; } },
 
-  saveActiveTask(task: any) {
-    if (!task) {
-      this.clearActiveTask();
-      return;
-    }
-    safeLocalStorageSet(STORAGE_KEYS.ACTIVE_TASK, task);
-  },
+  saveActiveTask(task: any) { if (!task) { this.clearActiveTask(); return; } safeLocalStorageSet(STORAGE_KEYS.ACTIVE_TASK, task); },
 
-  clearActiveTask() {
-    try {
-      localStorage.removeItem(STORAGE_KEYS.ACTIVE_TASK);
-      persistToIndexedDB(STORAGE_KEYS.ACTIVE_TASK, null);
-    } catch (e) {
-      console.warn('Error clearing active task:', e);
-    }
-  },
+  clearActiveTask() { try { localStorage.removeItem(STORAGE_KEYS.ACTIVE_TASK); localStorage.removeItem(`${STORAGE_KEYS.ACTIVE_TASK}${UPDATED_AT_SUFFIX}`); persistToIndexedDB(STORAGE_KEYS.ACTIVE_TASK, null); } catch (e) { console.warn('Error clearing active task:', e); } },
 
-  exportAllData(): string {
-    const bundle = {
-      app: 'PharmacyPurchaseMate',
-      version: '1.0.0',
-      exportedAt: new Date().toISOString(),
-      medicines: this.getMedicines(),
-      suppliers: this.getSuppliers(),
-      marketPrices: this.getMarketPrices(),
-      orders: this.getOrders(),
-      invoices: this.getInvoices(),
-      reconciliations: this.getReconciliations()
-    };
-    return JSON.stringify(bundle, null, 2);
-  },
+  exportAllData(): string { return JSON.stringify({ app: 'PharmacyPurchaseMate', version: '1.0.0', exportedAt: new Date().toISOString(), medicines: this.getMedicines(), suppliers: this.getSuppliers(), marketPrices: this.getMarketPrices(), orders: this.getOrders(), invoices: this.getInvoices(), reconciliations: this.getReconciliations() }, null, 2); },
 
   importAllData(jsonOrObject: string | Record<string, any>): { success: boolean; counts: Record<string, number>; error?: string } {
     try {
-      let data: any;
-      if (typeof jsonOrObject === 'string') {
-        data = JSON.parse(jsonOrObject);
-      } else {
-        data = jsonOrObject;
-      }
-
-      if (!data || typeof data !== 'object') {
-        return { success: false, counts: {}, error: 'صيغة الملف غير صحيحة' };
-      }
-
-      const importedMedicines = Array.isArray(data.medicines) ? data.medicines : [];
-      const importedSuppliers = Array.isArray(data.suppliers) ? data.suppliers : [];
-      const importedPrices = Array.isArray(data.marketPrices) ? data.marketPrices : [];
-      const importedOrders = Array.isArray(data.orders) ? data.orders : [];
-      const importedInvoices = Array.isArray(data.invoices) ? data.invoices : [];
-      const importedRecs = Array.isArray(data.reconciliations) ? data.reconciliations : [];
-
+      const data: any = typeof jsonOrObject === 'string' ? JSON.parse(jsonOrObject) : jsonOrObject;
+      if (!data || typeof data !== 'object') return { success: false, counts: {}, error: 'صيغة الملف غير صحيحة' };
+      const importedMedicines = Array.isArray(data.medicines) ? data.medicines : [], importedSuppliers = Array.isArray(data.suppliers) ? data.suppliers : [], importedPrices = Array.isArray(data.marketPrices) ? data.marketPrices : [], importedOrders = Array.isArray(data.orders) ? data.orders : [], importedInvoices = Array.isArray(data.invoices) ? data.invoices : [], importedRecs = Array.isArray(data.reconciliations) ? data.reconciliations : [];
       if (importedMedicines.length > 0) this.saveMedicines(importedMedicines);
       if (importedSuppliers.length > 0) this.saveSuppliers(importedSuppliers);
       if (importedPrices.length > 0) this.saveMarketPrices(importedPrices);
       if (importedOrders.length > 0) this.saveOrders(importedOrders);
       if (importedInvoices.length > 0) this.saveInvoices(importedInvoices);
-      if (importedRecs.length > 0) {
-        memoryCache.reconciliations = importedRecs;
-        safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, importedRecs);
-      }
-
-      return {
-        success: true,
-        counts: {
-          medicines: importedMedicines.length,
-          suppliers: importedSuppliers.length,
-          marketPrices: importedPrices.length,
-          orders: importedOrders.length,
-          invoices: importedInvoices.length,
-          reconciliations: importedRecs.length
-        }
-      };
-    } catch (err: any) {
-      return { success: false, counts: {}, error: err?.message || 'فشل استيراد النسخة الاحتياطية' };
-    }
+      if (importedRecs.length > 0) { memoryCache.reconciliations = importedRecs; safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, importedRecs); }
+      return { success: true, counts: { medicines: importedMedicines.length, suppliers: importedSuppliers.length, marketPrices: importedPrices.length, orders: importedOrders.length, invoices: importedInvoices.length, reconciliations: importedRecs.length } };
+    } catch (err: any) { return { success: false, counts: {}, error: err?.message || 'فشل استيراد النسخة الاحتياطية' }; }
   },
 
   resetAll() {
-    memoryCache.medicines = undefined;
-    memoryCache.suppliers = undefined;
-    memoryCache.marketPrices = undefined;
-    memoryCache.orders = undefined;
-    memoryCache.invoices = undefined;
-    memoryCache.reconciliations = undefined;
-
+    memoryCache.medicines = undefined; memoryCache.suppliers = undefined; memoryCache.marketPrices = undefined; memoryCache.orders = undefined; memoryCache.invoices = undefined; memoryCache.reconciliations = undefined;
     localStorage.clear();
-    safeLocalStorageSet(STORAGE_KEYS.MEDICINES, INITIAL_MEDICINES);
-    safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS);
-    safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES);
-    safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS);
-    safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
+    safeLocalStorageSet(STORAGE_KEYS.MEDICINES, INITIAL_MEDICINES); safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS); safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES); safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS); safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
   }
 };
-

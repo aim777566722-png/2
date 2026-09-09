@@ -596,25 +596,13 @@ function fallbackParseDocument(fileText: string, tableData: any[], fileName: str
   return {
     detectedType: isInvoice ? 'invoice' : 'order',
     documentTitle: fileName ? `مستند: ${fileName}` : 'مستند مشتريات',
-    partyName: knownSuppliers[0]?.name || 'صيدلية النخبة',
-    documentNumber: `DOC-${Math.floor(1000 + Math.random() * 9000)}`,
-    documentDate: new Date().toISOString().split('T')[0],
+    partyName: '',
+    documentNumber: '',
+    documentDate: '',
     totalAmount: items.reduce((sum, it) => sum + (it.totalPrice || 0), 0),
-    items: items.length > 0 ? items : [
-      {
-        itemName: 'صنف مستخرج من الوثيقة',
-        quantity: 1,
-        unit: 'علبة',
-        unitPrice: 0,
-        totalPrice: 0,
-        bonusScheme: '',
-        discountPercent: 0,
-        isUncertain: false,
-        uncertaintyReason: '',
-        notes: ''
-      }
-    ],
-    summary: `تم استخراج ${items.length} صنف من المستند بنجاح.`
+    items,
+    needsReview: true,
+    summary: items.length ? `تم استخراج ${items.length} صنفاً من بيانات جدول صريحة ويجب مراجعته.` : 'تعذر استخراج جدول أصناف موثوق؛ لا توجد بيانات مُنشأة احتياطياً.'
   };
 }
 
@@ -831,26 +819,8 @@ async function startServer() {
 
       return res.json({ success: true, data: parsed });
     } catch (err: any) {
-      console.warn('AI Invoice parsing failed, using fallback:', err?.message || err);
-      const fallback = {
-        supplierName: knownSuppliers[0]?.name || '',
-        invoiceDate: new Date().toISOString().split('T')[0],
-        invoiceNumber: `INV-${Math.floor(10000 + Math.random() * 90000)}`,
-        totalAmount: 0,
-        items: [
-          {
-            itemName: 'بندول اكسترا 500 ملجم',
-            quantity: 10,
-            unitPrice: 1450,
-            discountPercent: 0,
-            bonusScheme: '10+1',
-            totalPrice: 14500,
-            expiryDate: '2027-06',
-            matchedMedicineId: 'med-1'
-          }
-        ]
-      };
-      return res.json({ success: true, data: fallback, fallbackUsed: true });
+      console.warn('AI Invoice parsing failed:', err?.message || err);
+      return res.status(502).json({ success: false, error: 'تعذر تحليل الفاتورة بالذكاء الاصطناعي. لم يتم إنشاء أصناف أو أسعار احتياطية.' });
     }
   });
 
@@ -1031,9 +1001,8 @@ ${typeSpecificGuidance}
 
       return res.json({ success: true, data: parsed });
     } catch (err: any) {
-      console.warn('AI Document parsing failed, using smart local fallback:', err?.message || err);
-      const fallback = fallbackParseDocument(fileText || '', tableData, fileName || '', knownMedicines, knownSuppliers);
-      return res.json({ success: true, data: fallback, fallbackUsed: true });
+      console.warn('AI Document parsing failed:', err?.message || err);
+      return res.status(502).json({ success: false, error: 'تعذر تحليل المستند بالذكاء الاصطناعي. لم يتم إنشاء أصناف أو أسعار من بيانات غير مؤكدة.' });
     }
   });
 
