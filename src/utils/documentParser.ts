@@ -408,9 +408,19 @@ export function isDateLike(val: any): boolean {
 /**
  * Checks if a string is a column header or irrelevant footer artifact or date or timestamp
  */
+function isOcrNoiseLike(val: any): boolean {
+  const s = String(val ?? '').trim();
+  if (!s) return true;
+  if (/^\d{1,2}\s*\/\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|ص|م)?$/i.test(s)) return true;
+  if (/^(?:https?:\/\/|www\.|(?:www\s*[.]\s*)?\w+[.]\w{2,})(?:[/?#].*)?$/i.test(s)) return true;
+  if (/^(?:www|http|https|ftp|com|net|org)$/i.test(s)) return true;
+  return false;
+}
+
 function isHeaderOrJunk(name: string): boolean {
   const n = String(name || '').trim().toLowerCase();
   if (n.length < 2) return true;
+  if (isOcrNoiseLike(n)) return true;
   if (/^[\u0600-\u06FFa-zA-Z0-9\s]$/.test(n)) return true;
 
   // A date or timestamp MUST NEVER be treated as a medicine name or valid header
@@ -541,6 +551,7 @@ function parseSingleRowIntelligently(
 
   cleanCells.forEach((cell, colIdx) => {
     if (!cell) return;
+    if (isOcrNoiseLike(cell)) return;
 
     // Check for Expiry Date (YYYY-MM, MM/YY, YYYY/MM/DD, DD/MM/YYYY, Excel dates, etc.)
     if (isDateLike(cell)) {

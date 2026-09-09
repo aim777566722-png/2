@@ -341,7 +341,12 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
 
         const hasLargeExcelDataset = files.some(f => f.type === 'excel' || String(f.name || '').toLowerCase().endsWith('.xlsx') || String(f.name || '').toLowerCase().endsWith('.csv')) && fullExtractedTableRows.length > 10;
 
-        if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {
+        if (analysisMode === 'local') {
+          extracted.items = validatedExtractedItems;
+          if (validatedExtractedItems.length === 0) {
+            extracted.summary = 'لم يتم العثور على صفوف دوائية موثوقة في التحليل المحلي؛ لم يتم استبدال النتيجة ببيانات OCR غير موثوقة.';
+          }
+        } else if (hasLargeExcelDataset && fullExtractedTableRows.length > validatedExtractedItems.length) {
           extracted.items = fullExtractedTableRows;
           extracted.summary = `تم استخراج كافة الـ ${fullExtractedTableRows.length} صنفاً من الجدول المحلي.`;
         } else {
