@@ -20,7 +20,6 @@ function unit(value: string | undefined) { const v = normalizeOcrText(value); re
 function valueAt(row: string[], index: number | undefined, positive = false): number | null { if (index === undefined || isDate(row[index] || '')) return null; const value = numberOf(row[index]); return value !== null && (!positive || value > 0) ? value : null; }
 function parseTableRow(row: string[], schema: Schema): ParsedItem | null {
   const nameCell = schema.name === undefined ? '' : row[schema.name];
-  // A footer or truncated OCR row may not contain every schema column. Reject it before cleanName can touch absent cells.
   if (!nameCell) return null;
   const nameValue = cleanName(nameCell, schema, row);
   if (isJunkName(nameValue)) return null;
@@ -33,11 +32,15 @@ function parseTableRow(row: string[], schema: Schema): ParsedItem | null {
 }
 export function extractItemsFromRows(rows: unknown[]): ParsedItem[] {
   const table = detectTable(rows); if (!table) return [];
-  const all = rows.map(cells); const result: ParsedItem[] = []; const seen = new Set<string>(); let misses = 0;
-  for (let i = table.headerIndex + 1; i < all.length; i++) { const row = all[i]; if (!row.length) continue; if (row.some(c => field(c) === 'name') && row.some(c => field(c) === 'price' || field(c) === 'total')) { misses = 0; continue; }
-    const item = parseTableRow(row, table.schema); if (!item) { if (++misses >= 3) break; continue; } misses = 0;
-    const key = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`; if (!seen.has(key)) { seen.add(key); result.push(item); }
-  } return result;
+  const all = rows.map(cells); const result: ParsedItem[] = []; const seen = new Set<string>();
+  for (let i = table.headerIndex + 1; i < all.length; i++) {
+    const row = all[i]; if (!row.length) continue;
+    if (row.some(c => field(c) === 'name') && row.some(c => field(c) === 'price' || field(c) === 'total')) continue;
+    const item = parseTableRow(row, table.schema); if (!item) continue;
+    const key = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`;
+    if (!seen.has(key)) { seen.add(key); result.push(item); }
+  }
+  return result;
 }
 function first(text: string, patterns: RegExp[]) { for (const pattern of patterns) { const match = text.match(pattern); if (match?.[1]) return normalizeOcrText(match[1]); } return ''; }
 function metadata(text: string, names: string[]) { return { documentNumber: first(text, [/(?:invoice|inv|فاتورة|رقم\s*الفاتورة|رقم\s*المستند)\s*[:#№-]?\s*([A-Z0-9][A-Z0-9/_-]{1,30})/i]), documentDate: first(text, [/(?:date|تاريخ)\s*[:：-]?\s*([0-9]{1,4}[/.-][0-9]{1,2}(?:[/.-][0-9]{2,4})?)/i]), currency: first(text, [/(YER|SAR|USD|EUR|AED|ريال\s*يمني|ريال|دولار|يورو|درهم)/i]), title: /مرتجع|sales\s*return|return\s*invoice/i.test(text) ? 'مرتجع' : /فاتورة|invoice/i.test(text) ? 'فاتورة' : names.join(' + ') }; }
