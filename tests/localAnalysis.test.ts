@@ -8,6 +8,15 @@ const rtl = [
   ['1250', '1250', '1', 'علبة', 'أوجمنتين 625 مجم', '555', '2027/08'],
   ['الإجمالي', '4250'],
 ];
+const rtlSparseRows = [
+  ['م', 'رقم الصنف', 'اسم الصنف', 'الوحدة', 'الكمية', 'بونص', 'السعر', 'التشغيلة', 'تاريخ الانتهاء', 'القيمة'],
+  ['1', '0117406', 'نيدو اكياس 2250غرام شهاب', 'كيس', '1', '0', '11,100.00', '1058212', '01/01/2027', '11,100.00'],
+  ['2', '0103569', 'شامبو نونو للاطفال بخاخ 600مل الصديق', 'مضرب', '1', '0', '1,700.00', '1060348', '01/04/2030', '1,700.00'],
+  ['3', '100124732', 'شامبو نونو للاطفال 500مل الصديق', 'علبة', '1', '0', '1,380.00', '1071502', '01/10/2029', '1,380.00'],
+  ['4', '0109506', 'شامبو نونو للاطفال 400مل الصديق', 'علبة', '1', '0', '1,150.00', '1059202', '1,150.00'],
+  ['5', '0107960', 'محلول هيدروجين بروكسيد 60مل / الدولية', 'قارورة', '2', '0', '370.00', '1057650', '01/02/2027', '740.00'],
+  ['الإجمالي', '16,910.00'],
+];
 const ltr = [
   ['Item No', 'Description', 'Unit', 'Qty', 'Unit Price', 'Amount', 'Expiry'],
   ['88', 'Amoxicillin 500 mg', 'box', '3', '12.50', '37.50', '05/27'],
@@ -22,6 +31,19 @@ assert.equal(arabic[0].itemName, 'بندول اكسترا 500 مجم');
 assert.equal(arabic[0].unitPrice, 1500);
 assert.equal(arabic[0].totalPrice, 3000);
 assert.equal(arabic[0].expiryDate, '06/27');
+
+const sparse = extractItemsFromRows(rtlSparseRows);
+assert.equal(sparse.length, 5, 'sparse RTL rows must keep every real product and reject the footer');
+assert.equal(sparse[0].itemName, 'نيدو اكياس 2250غرام شهاب');
+assert.equal(sparse[0].unitPrice, 11100);
+assert.equal(sparse[0].totalPrice, 11100);
+assert.equal(sparse[1].itemName, 'شامبو نونو للاطفال بخاخ 600مل الصديق');
+assert.equal(sparse[1].unitPrice, 1700);
+assert.equal(sparse[2].itemName, 'شامبو نونو للاطفال 500مل الصديق');
+assert.equal(sparse[4].quantity, 2);
+assert.equal(sparse[4].unitPrice, 370);
+assert.equal(sparse[4].totalPrice, 740);
+
 const english = extractItemsFromRows(ltr);
 assert.equal(english.length, 2);
 assert.equal(english[0].itemName, 'Amoxicillin 500 mg');
