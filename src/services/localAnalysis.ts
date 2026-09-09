@@ -1,29 +1,158 @@
 import { validateAndSanitizeInvoiceItemList } from '../utils/helpers';
+import { mapTableDataToMedicineItems } from '../utils/documentParser';
 
-type LocalFile={name:string;mimeType?:string;base64?:string;pageImages?:string[];extractedText?:string;tableData?:any[]};
-type Schema={name?:number;unit?:number;quantity?:number;bonus?:number;price?:number;code?:number;expiry?:number;total?:number;serial?:number};
-const AR='٠١٢٣٤٥٦٧٨٩',FA='۰۱۲۳۴۵۶۷۸۹';let itemCounter=0;
-const normDigits=(v:any)=>String(v??'').replace(/[٠-٩]/g,d=>String(AR.indexOf(d))).replace(/[۰-۹]/g,d=>String(FA.indexOf(d)));
-const norm=(v:any)=>normDigits(v).replace(/[\u064B-\u065F\u0670]/g,'').replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,'').replace(/\s+/g,' ').trim();
-const compact=(v:any)=>norm(v).toLowerCase().replace(/[\s:：._\-\/]+/g,'');
-function num(v:any){if(typeof v==='number'&&Number.isFinite(v))return v;let s=normDigits(v).trim().replace(/[٬،]/g,',').replace(/\s/g,'').replace(/[^0-9.,+\-]/g,'');if(!s)return 0;const c=s.lastIndexOf(','),d=s.lastIndexOf('.');if(c>=0&&d>=0)s=c>d?s.replace(/\./g,'').replace(',','.'):s.replace(/,/g,'');else if(c>=0)s=/,\d{1,2}$/.test(s)?s.replace(',','.'):s.replace(/,/g,'');const n=Number(s);return Number.isFinite(n)?n:0;}
-function pure(v:any){const s=normDigits(v).trim().replace(/[٬،]/g,',').replace(/\s/g,'');return /^[-+]?(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[.]\d+)?$/.test(s);}
-function dateLike(v:any){const s=normDigits(v).trim();return /^(?:20\d{2}[/.\-]\d{1,2}(?:[/.\-]\d{1,2})?|\d{1,2}[/.\-]\d{1,2}[/.\-](?:20)?\d{2}|\d{1,2}[/.\-](?:20)?\d{2})$/.test(s);}
-function cells(row:any):string[]{if(Array.isArray(row))return row.map(norm).filter(Boolean);if(row&&typeof row==='object')return Object.values(row).map(norm).filter(Boolean);const s=String(row??'').trim();if(!s)return[];if(s.includes('|'))return s.split(/\s*\|\s*/).map(norm).filter(Boolean);if(s.includes('\t'))return s.split(/\t+/).map(norm).filter(Boolean);return s.split(/\s{2,}/).map(norm).filter(Boolean);}
-function kind(v:string):keyof Schema|''{const s=compact(v);if(/^(اسمالصنف|اسمالدواء|الصنف|الدواء|البيان|الوصف|المستحضر|المادة|اسمالمادة|itemname|medicine|product|description)$/.test(s))return'name';if(/^(الوحدة|unit|units|وحدة)$/.test(s))return'unit';if(/^(الكمية|كمية|qty|quantity|عدد)$/.test(s))return'quantity';if(/^(بونص|bonus|bon|هدية)$/.test(s))return'bonus';if(/^(السعر|سعر|price|unitprice|rate)$/.test(s))return'price';if(/^(رقمالصنف|كودالصنف|رقم|كود|باركود|barcode|code|itemno)$/.test(s))return'code';if(/^(تاريخالانتهاء|تاريخالصلاحية|الصلاحية|انتهاء|expiry|expiration|exp|date)$/.test(s))return'expiry';if(/^(القيمة|الإجمالي|اجمالي|المجموع|total|amount|value)$/.test(s))return'total';if(/^(م|تسلسل|التسلسل|no|#|serial)$/.test(s))return'serial';return'';}
-function schemaFromRows(rs:string[][]):Schema|null{for(const cs of rs){const s:Schema={};cs.forEach((c,i)=>{const k=kind(c);if(k&&s[k]===undefined)s[k]=i});const score=Object.keys(s).length;if(s.name!==undefined&&s.price!==undefined&&score>=3)return s;if(s.name!==undefined&&s.quantity!==undefined&&s.unit!==undefined&&score>=3)return s;}return null;}
-function junk(v:string){const s=compact(v);return /^(العنوان|address|هاتف|phone|مدخل|entrancetothewhitepalacehall|entrance|صيدلية|pharmacy|التاريخ|date|رقمالفاتورة|invoice|الفاتورة|الفرع|branch|القطاع|القسم|الملاحظات|ملاحظات|رقمالعميل|customer|العميل|العملة|currency|نسخة|مدخلالبيانات|المستخدم|printed|طباعة|من\d+)$/.test(s)||/(address|phone|entrance|modernsoft|yemensoft|printed|مدخل البيانات|المستخدم|تاريخ ووقت الإضافة)/i.test(v);}
-function looksName(v:string){const s=norm(v);return s.length>=2&&!dateLike(s)&&!pure(s)&&/[A-Za-z\u0600-\u06FF]/.test(s)&&!junk(s)&&!/(^|\s)(العنوان|هاتف|phone|address|رقم الفاتورة|رقم العميل|التاريخ|الفرع|القطاع|القسم|ملاحظات)(\s|:|\/|$)/i.test(s);}
-function cleanName(v:string){let s=norm(v).replace(/^[\s:؛,\-–—|]+|[\s:؛,\-–—|]+$/g,'').trim();s=s.replace(/^\d{4,12}\s+/,'').trim();s=s.replace(/\s+(?:\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}|\d{1,2}[/.\-]\d{1,2}|20\d{2}[/.\-]\d{1,2}(?:[/.\-]\d{1,2})?)$/,'').trim();return s;}
-function unitOf(v:string){return /^(كيس|علبة|علب|باكت|شريط|كرتون|حبة|حبات|قرص|كبسول|كبسولة|امبول|أمبول|فيال|تيوب|توپ|قطعة|وحدة|قارورة|مضرب|شرائط|tab|tabs|cap|caps|vial|amp|box)$/i.test(v.trim())?norm(v):'علبة';}
-function at(cs:string[],i:number){return i>=0&&i<cs.length&&pure(cs[i])&&!dateLike(cs[i])?num(cs[i]):0;}
-function near(cs:string[],preferred:number,used:Set<number>,min:number,max:number){let best:any=null;cs.forEach((c,i)=>{if(used.has(i)||!pure(c)||dateLike(c))return;const n=num(c);if(!Number.isFinite(n)||n<min||n>max)return;const d=Math.abs(i-preferred);if(!best||d<best.d)best={i,n,d};});return best;}
-function structured(cs:string[],s:Schema){let ni=s.name??-1;if(ni<0||!looksName(cs[ni]||'')){const c=cs.map((v,i)=>({v,i})).filter(x=>looksName(x.v));if(!c.length)return null;ni=c.sort((a,b)=>Math.abs(a.i-(s.name??0))-Math.abs(b.i-(s.name??0)))[0].i;}const used=new Set<number>([ni]);let q=at(cs,s.quantity??-1);if(q<1||q>10000){const x=near(cs,s.quantity??ni,used,1,1000);q=x?.n||1;if(x)used.add(x.i);}else used.add(s.quantity!);let p=at(cs,s.price??-1);if(p>0)used.add(s.price!);let total=at(cs,s.total??-1);if(total>0)used.add(s.total!);
-if(p<=0&&total>0&&q>0)p=total/q;if(p<=0){const x=near(cs,s.price??(ni+4),used,0.01,1e8);if(x){p=x.n;used.add(x.i);}}if(total<=0&&p>0)total=p*q;if(p<=0)return null;const name=cleanName(cs[ni]);if(!looksName(name))return null;const expiry=s.expiry!==undefined&&dateLike(cs[s.expiry])?cs[s.expiry]:undefined;return{id:`local-${Date.now()}-${itemCounter++}`,itemName:name,quantity:q,unit:unitOf(s.unit!==undefined?cs[s.unit]:''),unitPrice:p,totalPrice:total>0?total:p*q,bonusScheme:'',discountPercent:0,notes:'',expiryDate:expiry,rawText:cs.join(' | ')};}
-function fallback(cs:string[]){const nc=cs.map((v,i)=>({v,i})).filter(x=>looksName(x.v));if(!nc.length)return null;const n=nc.sort((a,b)=>b.v.length-a.v.length)[0];const nums=cs.map((v,i)=>({v,i,n:num(v)})).filter(x=>x.i!==n.i&&pure(x.v)&&!dateLike(x.v)&&x.n>0);const p=nums.find(x=>/[,.]\d{1,2}$/.test(x.v)||/\d{1,3}(?:,\d{3})+/.test(x.v))||nums.find(x=>x.n>=100);if(!p)return null;const qx=nums.find(x=>Number.isInteger(x.n)&&x.n>=1&&x.n<=1000&&x.i!==p.i);const q=qx?.n||1;const tx=nums.find(x=>x.i!==p.i&&x.i!==qx?.i&&Math.abs(x.n-p.n*q)<=Math.max(1,p.n*q*.03));return{id:`local-${Date.now()}-${itemCounter++}`,itemName:cleanName(n.v),quantity:q,unit:unitOf(cs.find(x=>unitOf(x)!=='علبة')||''),unitPrice:p.n,totalPrice:tx?.n||p.n*q,bonusScheme:'',discountPercent:0,notes:'',rawText:cs.join(' | ')};}
-function parseRows(lines:any[]){const all=lines.map(cells).filter(Boolean);const schema=schemaFromRows(all);const out:any[]=[],seen=new Set<string>();let table=false;for(const cs of all){if(schema&&cs.some(c=>kind(c)==='name')&&cs.some(c=>kind(c)==='price')){table=true;continue;}const item=schema&&table?structured(cs,schema):(!schema?fallback(cs):null);if(item&&item.itemName&&item.unitPrice>0){const key=`${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`;if(!seen.has(key)){seen.add(key);out.push(item);}}}return out;}
-function first(t:string,ps:RegExp[]){for(const p of ps){const m=t.match(p);if(m?.[1])return norm(m[1]);}return'';}
-function metadata(t:string,names:string[]){const x=t.split('\n').map(norm).filter(Boolean).join('\n');return{documentNumber:first(x,[/(?:invoice|inv|فاتورة|الفاتورة|رقم\s*الفاتورة|رقم\s*المستند)\s*[:#№-]?\s*([A-Z0-9][A-Z0-9\/_-]{1,30})/i]),documentDate:first(x,[/(?:date|dated|تاريخ|التاريخ)\s*[:：-]?\s*([0-9]{1,4}[/.\-][0-9]{1,2}(?:[/.\-][0-9]{2,4})?)/i]),partyName:'',currency:first(x,[/(?:currency|العملة|عملة)\s*[:：-]?\s*([^\n]+)/i,/(YER|SAR|USD|EUR|AED|ريال\s*يمني|ريال|دولار|يورو|درهم)/i]),title:/مرتجع|sales\s*return|return\s*invoice/i.test(x)?'مرتجع':/أمر\s*شراء|purchase\s*order/i.test(x)?'أمر شراء':/قائمة\s*أسعار|price\s*list/i.test(x)?'قائمة أسعار':/فاتورة|invoice/i.test(x)?'فاتورة':names.join(' + ')};}
-function dataUrl(v:string,m='image/jpeg'){return/^data:/i.test(v)?v:`data:${m};base64,${v}`;}
-async function prep(v:string){if(typeof window==='undefined')return v;return new Promise<string>(r=>{const img=new Image();img.onload=()=>{try{const max=2800,sc=Math.min(2,max/Math.max(img.naturalWidth||1,img.naturalHeight||1)),w=Math.max(1,Math.round((img.naturalWidth||img.width)*sc)),h=Math.max(1,Math.round((img.naturalHeight||img.height)*sc)),c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');if(!x)return r(v);x.fillStyle='#fff';x.fillRect(0,0,w,h);x.drawImage(img,0,0,w,h);r(c.toDataURL('image/png'));}catch{r(v);}};img.onerror=()=>r(v);img.src=v;});}
-export async function analyzeDocumentLocally(params:{files:LocalFile[];targetType:'order'|'invoice'|'price_list';knownMedicines?:string[];knownSuppliers?:string[];onProgress?:(p:number,m:string,s?:number)=>void}){const{files,targetType,onProgress}=params;if(!files.length)throw new Error('لا توجد ملفات للتحليل المحلي');let text='',raw:any[]=[],pages=0,done=0;for(const f of files){pages+=f.pageImages?.length||(f.base64&&/image\//i.test(f.mimeType||'')?1:0);if(f.tableData?.length)raw.push(...f.tableData);if(f.extractedText)text+=`\n${f.extractedText}`;}pages=Math.max(1,pages);for(const f of files){const ps=f.pageImages?.length?f.pageImages:(f.base64&&/image\//i.test(f.mimeType||'')?[f.base64]:[]);if(!ps.length)continue;const{ocrImageDataUrlWithLayout}=await import('./localOcrFixed');for(let i=0;i<ps.length;i++){onProgress?.(20+Math.round(done/pages*10),`تشغيل OCR المحلي للصفحة ${i+1} من ${ps.length}...`,2);const o=await ocrImageDataUrlWithLayout(await prep(dataUrl(ps[i],f.mimeType||'image/jpeg')),p=>onProgress?.(20+Math.round((done+p/100)/pages*68),`استخراج البيانات محلياً...`,2));if(o.text)text+=`\n${o.text}`;if(o.layoutText)raw.push(...o.layoutText.split('\n'));else if(o.text)raw.push(...o.text.split('\n'));done++;}}const items=validateAndSanitizeInvoiceItemList(parseRows(raw));const md=metadata(text,files.map(f=>f.name));const total=items.reduce((s:any,x:any)=>s+(Number(x.totalPrice)||0),0);onProgress?.(94,`اكتمل التحليل المحلي: ${items.length} صنفاً`,3);return{detectedType:targetType,documentTitle:md.title,partyName:md.partyName,documentNumber:md.documentNumber,documentDate:md.documentDate,currency:md.currency,totalAmount:total,items,confidence:items.length?90:40,summary:`تحليل محلي: قراءة جميع الصفحات واكتشاف عناوين الأعمدة ثم ربط الاسم والكمية والسعر والقيمة من الصف نفسه دون Gemini.`,rawText:text.trim()};}
+type LocalFile = {
+  name: string;
+  mimeType?: string;
+  base64?: string;
+  pageImages?: string[];
+  extractedText?: string;
+  tableData?: any[];
+};
+
+const AR = '٠١٢٣٤٥٦٧٨٩';
+const FA = '۰۱۲۳۴۵۶۷۸۹';
+
+function normalizeDigits(value: any): string {
+  return String(value ?? '')
+    .replace(/[٠-٩]/g, d => String(AR.indexOf(d)))
+    .replace(/[۰-۹]/g, d => String(FA.indexOf(d)));
+}
+
+function normalizeText(value: any): string {
+  return normalizeDigits(value)
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isExtractionNoise(value: any): boolean {
+  const s = normalizeText(value);
+  if (!s) return true;
+  if (/^\d{1,2}\s*\/\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|ص|م)?$/i.test(s)) return true;
+  if (/^(?:https?:\/\/|www\.|(?:www\s*[.]\s*)?\w+[.]\w{2,})(?:[/?#].*)?$/i.test(s)) return true;
+  if (/^(?:www|http|https|ftp|com|net|org|mg|ml)$/i.test(s)) return true;
+  if (/^\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|ص|م)?$/i.test(s)) return true;
+  return false;
+}
+
+function dataUrl(value: string, mime = 'image/jpeg'): string {
+  if (!value) return '';
+  if (value.startsWith('data:')) return value;
+  return `data:${mime};base64,${value}`;
+}
+
+async function prepareImage(value: string): Promise<string> {
+  if (typeof window === 'undefined' || !value) return value;
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const max = 2800;
+        const scale = Math.min(2, max / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+        const width = Math.max(1, Math.round((img.naturalWidth || img.width) * scale));
+        const height = Math.max(1, Math.round((img.naturalHeight || img.height) * scale));
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return resolve(value);
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/png'));
+      } catch {
+        resolve(value);
+      }
+    };
+    img.onerror = () => resolve(value);
+    img.src = value;
+  });
+}
+
+function filterItems(items: any[]): any[] {
+  const sanitized = validateAndSanitizeInvoiceItemList(Array.isArray(items) ? items : []);
+  return sanitized.filter(item => {
+    const name = normalizeText(item?.itemName);
+    if (isExtractionNoise(name)) return false;
+    if (name.length < 2) return false;
+    if (!/[A-Za-z\u0600-\u06FF]/.test(name)) return false;
+    return true;
+  });
+}
+
+export async function analyzeDocumentLocally(params: {
+  files: LocalFile[];
+  targetType: 'order' | 'invoice' | 'price_list';
+  knownMedicines?: string[];
+  knownSuppliers?: string[];
+  onProgress?: (p: number, message: string, stage?: number) => void;
+}) {
+  const { files, targetType, onProgress } = params;
+  if (!files.length) throw new Error('لا توجد ملفات للتحليل المحلي');
+
+  let text = '';
+  const rawRows: any[] = [];
+  const images: { value: string; mimeType: string }[] = [];
+
+  for (const file of files) {
+    if (file.extractedText) text += `\n${file.extractedText}`;
+    if (Array.isArray(file.tableData)) rawRows.push(...file.tableData);
+    for (const image of file.pageImages || []) images.push({ value: image, mimeType: 'image/jpeg' });
+    if (file.base64 && !file.pageImages?.length && /image\//i.test(file.mimeType || '')) {
+      images.push({ value: file.base64, mimeType: file.mimeType || 'image/jpeg' });
+    }
+  }
+
+  let items = filterItems(mapTableDataToMedicineItems(rawRows.length ? rawRows : undefined, text.trim()));
+  let ocrPages = 0;
+
+  if (images.length) {
+    const { ocrImageDataUrlWithLayout } = await import('./localOcrFixed');
+    for (let i = 0; i < images.length; i++) {
+      onProgress?.(20 + Math.round((i / images.length) * 65), `استخراج البيانات محلياً من الصفحة ${i + 1} من ${images.length}...`, 2);
+      try {
+        const ocr = await ocrImageDataUrlWithLayout(
+          await prepareImage(dataUrl(images[i].value, images[i].mimeType)),
+          progress => onProgress?.(20 + Math.round(((i + progress / 100) / images.length) * 65), 'تشغيل OCR المحلي...', 2)
+        );
+        if (ocr.text) text += `\n${ocr.text}`;
+        const layoutSource = ocr.layoutText || ocr.text || '';
+        if (layoutSource) {
+          const ocrItems = filterItems(mapTableDataToMedicineItems(undefined, layoutSource));
+          items = filterItems([...items, ...ocrItems]);
+        }
+        ocrPages++;
+      } catch (error) {
+        console.warn('Local OCR page failed:', error);
+      }
+    }
+  }
+
+  const unique = new Map<string, any>();
+  for (const item of items) {
+    const key = `${normalizeText(item.itemName).toLowerCase()}|${item.quantity}|${item.unitPrice}`;
+    if (!unique.has(key)) unique.set(key, item);
+  }
+  items = Array.from(unique.values());
+
+  const totalAmount = items.reduce((sum, item) => sum + (Number(item.totalPrice) || 0), 0);
+  onProgress?.(94, `اكتمل التحليل المحلي: ${items.length} صنفاً موثوقاً${ocrPages ? ` من ${ocrPages} صفحة` : ''}`, 3);
+
+  return {
+    detectedType: targetType,
+    documentTitle: files.map(f => f.name).join(' + '),
+    partyName: '',
+    documentNumber: '',
+    documentDate: '',
+    currency: 'ريال',
+    totalAmount,
+    items,
+    confidence: items.length ? 90 : 35,
+    summary: items.length
+      ? `تحليل محلي: تم اعتماد ${items.length} صنفاً بعد استبعاد التواريخ والأوقات والروابط وقطع OCR غير الصيدلانية.`
+      : 'تحليل محلي: لم يتم العثور على صفوف دوائية موثوقة؛ لم يتم اختراع بيانات بديلة.',
+    rawText: text.trim()
+  };
+}
