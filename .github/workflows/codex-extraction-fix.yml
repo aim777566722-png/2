@@ -1,0 +1,56 @@
+name: Codex extraction fix
+on:
+  push:
+    branches: [codex-full-fix]
+permissions:
+  contents: write
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-full-fix
+          fetch-depth: 1
+      - name: Apply extraction safeguards
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path('src/utils/documentParser.ts')
+          s = p.read_text()
+          anchor = "function isHeaderOrJunk(name: string): boolean {"
+          helper = r'''function isOcrNoiseLike(val: any): boolean {
+            const s = String(val ?? '').trim();
+            if (!s) return true;
+            if (/^\d{1,2}\s*\/\s*\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|ص|م)?$/i.test(s)) return true;
+            if (/^(?:https?:\/\/|www\.|(?:www\s*[.]\s*)?\w+[.]\w{2,})(?:[/?#].*)?$/i.test(s)) return true;
+            if (/^(?:www|http|https|ftp|com|net|org)$/i.test(s)) return true;
+            return false;
+          }
+
+          if 'function isOcrNoiseLike' not in s:
+              if anchor not in s: raise SystemExit('parser anchor not found')
+              s = s.replace(anchor, helper + anchor, 1)
+          old = """  if (n.length < 2) return true;\n  if (/^[\\u0600-\\u06FFa-zA-Z0-9\\s]$/.test(n)) return true;\n\n  // A date or timestamp MUST NEVER be treated as a medicine name or valid header\n"""
+          new = """  if (n.length < 2) return true;\n  if (isOcrNoiseLike(n)) return true;\n  if (/^[\\u0600-\\u06FFa-zA-Z0-9\\s]$/.test(n)) return true;\n\n  // A date or timestamp MUST NEVER be treated as a medicine name or valid header\n"""
+          if old in s and new not in s: s = s.replace(old, new, 1)
+          old2 = """    if (!cell) return;\n\n    // Check for Expiry Date"""
+          new2 = """    if (!cell) return;\n    if (isOcrNoiseLike(cell)) return;\n\n    // Check for Expiry Date"""
+          if old2 in s and new2 not in s: s = s.replace(old2, new2, 1)
+          p.write_text(s)
+
+          p = Path('src/context/BackgroundAnalysisContext.tsx')
+          s = p.read_text()
+          old = "const validatedExtractedItems = validateAndSanitizeInvoiceItemList(extracted.items || []);\n        extracted.items = validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows;"
+          new = "const validatedExtractedItems = validateAndSanitizeInvoiceItemList(extracted.items || []);\n        extracted.items = analysisMode === 'local'\n          ? validatedExtractedItems\n          : (validatedExtractedItems.length > 0 ? validatedExtractedItems : fullExtractedTableRows);"
+          if old not in s: raise SystemExit('fallback assignment anchor not found')
+          p.write_text(s.replace(old, new, 1))
+      - name: Commit and push
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/utils/documentParser.ts src/context/BackgroundAnalysisContext.tsx
+          git diff --cached --quiet && exit 0
+          git commit -m 'fix: harden OCR row extraction'
+          git push origin codex-full-fix
