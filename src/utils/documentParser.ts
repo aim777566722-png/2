@@ -119,7 +119,7 @@ async function processPDFDocument(file: File) {
     const page = await pdf.getPage(pageNo);
     try {
       const viewport = page.getViewport({ scale: 2 }); const canvas = document.createElement('canvas'); canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height); const ctx = canvas.getContext('2d');
-      if (ctx) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); await page.render({ canvasContext: ctx, viewport }).promise; pageImages.push(canvas.toDataURL('image/jpeg', 0.9)); }
+      if (ctx) { ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); await page.render({ canvas, canvasContext: ctx, viewport }).promise; pageImages.push(canvas.toDataURL('image/jpeg', 0.9)); }
     } catch { /* text extraction remains usable when canvas rendering fails */ }
     const content = await page.getTextContent();
     const items = (content.items as any[]).filter(x => cleanText(x.str));
