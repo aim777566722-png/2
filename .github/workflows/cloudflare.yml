@@ -34,17 +34,13 @@ jobs:
         run: |
           set -e
           URL="https://document-ai-api.aim777566722.workers.dev/api/health"
-          curl --fail --show-error --silent --location --retry 10 --retry-delay 5 --connect-timeout 10 --max-time 30 "$URL"
-      - name: Verify all API routes
-        if: ${{ github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/codex-full-fix' }}
+          curl --fail --show-error --silent --location --retry 10 --retry-delay 5 --connect-timeout 10 --max-time 30 "$URL" | grep -q '"ok":true'
+      - name: Verify all API routes without consuming Gemini quota
         run: |
           set -e
           URL="https://document-ai-api.aim777566722.workers.dev"
           for ROUTE in parse-document parse-order parse-invoice refine-text match-order-invoice; do
-            BODY='{"documentType":"order","extractionMode":"pure_text","fileName":"route-test.txt","fileText":"Panadol 500mg x 2"}'
-            RESPONSE=$(curl --show-error --silent --location --connect-timeout 10 --max-time 120 -H "Content-Type: application/json" -d "$BODY" -w '\nHTTP_STATUS:%{http_code}' "$URL/api/$ROUTE")
-            echo "$ROUTE: $RESPONSE"
-            STATUS=$(printf '%s' "$RESPONSE" | sed -n 's/^HTTP_STATUS://p')
+            STATUS=$(curl --show-error --silent --output /dev/null --location --connect-timeout 10 --max-time 30 -X OPTIONS -H "Origin: https://example.com" -H "Access-Control-Request-Method: POST" -H "Access-Control-Request-Headers: Content-Type" -w '%{http_code}' "$URL/api/$ROUTE")
+            echo "$ROUTE preflight HTTP $STATUS"
             [ "$STATUS" = "200" ]
-            printf '%s' "$RESPONSE" | grep -q '"success":true'
           done
