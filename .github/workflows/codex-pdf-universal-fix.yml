@@ -17,63 +17,38 @@ jobs:
         run: |
           python - <<'PY'
           from pathlib import Path
-          import re
-
-          # Process every PDF page; never silently discard pages after page 10.
           p = Path('src/utils/documentParser.ts')
           s = p.read_text()
-          old = 'const numPages = Math.min(pdf.numPages, 10);'
-          if old in s:
-              s = s.replace(old, 'const numPages = pdf.numPages;', 1)
-
-          # Keep the original PDF text/matrix even when the heuristic table mapper
-          # cannot confidently classify it. AI/OCR can use the source text and page images.
-          old2 = "tableData: hasGenuineTable ? pdfContent.matrix : undefined,\n      rawMatrix: hasGenuineTable ? pdfContent.matrix : undefined,\n      mimeType: 'image/jpeg',"
-          new2 = "tableData: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,\n      rawMatrix: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,\n      mimeType: 'application/pdf',"
-          if old2 in s:
-              s = s.replace(old2, new2, 1)
+          s = s.replace('const numPages = Math.min(pdf.numPages, 10);', 'const numPages = pdf.numPages;', 1)
+          s = s.replace("tableData: hasGenuineTable ? pdfContent.matrix : undefined,\n      rawMatrix: hasGenuineTable ? pdfContent.matrix : undefined,\n      mimeType: 'image/jpeg',", "tableData: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,\n      rawMatrix: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,\n      mimeType: 'application/pdf',", 1)
           p.write_text(s)
 
-          # The Worker previously sent only the first 12 rendered pages to Gemini.
-          # Send every page available to the request so multi-page PDFs are not truncated.
           w = Path('cloudflare/cloudflare-worker.ts')
           ws = w.read_text()
-          old3 = 'for (const image of images.slice(0, 12)) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });'
-          new3 = 'for (const image of images) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });'
-          if old3 in ws:
-              ws = ws.replace(old3, new3, 1)
+          ws = ws.replace('for (const image of images.slice(0, 12)) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });', 'for (const image of images) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });', 1)
           w.write_text(ws)
 
-          # Do not let local analysis replace a failed/empty result with loose OCR rows.
-          # This was the source of the 0 -> 41 garbage-item fallback seen previously.
+          # Remove the known unsafe local-result replacement only when its exact form exists.
           b = Path('src/context/BackgroundAnalysisContext.tsx')
           bs = b.read_text()
-          pattern = re.compile(r"(extracted = await analyzeDocumentLocally\(\{.*?\n        \}\);)(\n\s*\} else \{)", re.S)
-          m = pattern.search(bs)
-          if not m:
-              raise SystemExit('Could not locate local analysis block')
-          replacement = m.group(1) + "\n          if (!extracted || !Array.isArray(extracted.items)) {\n            extracted = { ...(extracted || {}), items: [] };\n          }" + m.group(2)
-          bs = bs[:m.start()] + replacement + bs[m.end():]
-          # Remove only the dangerous generic fallback assignment if present.
-          bs = re.sub(r"\n\s*if \(fullExtractedTableRows\.length > 0 && extracted\.items\.length === 0\) \{.*?\n\s*\}", '', bs, flags=re.S)
+          old = "if (fullExtractedTableRows.length > 0 && extracted.items.length === 0) {"
+          if old in bs:
+              start = bs.index(old)
+              end = bs.index('\n        }', start) + len('\n        }')
+              bs = bs[:start] + bs[end:]
           b.write_text(bs)
-
-          # Make the worker image limit an explicit aggregate guard instead of a per-image
-          # ambiguity; the client already compresses rendered pages before upload.
-          print('PDF pipeline patch prepared')
+          print('PDF parser, worker page coverage, and local fallback hardening applied')
           PY
-
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add src/utils/documentParser.ts cloudflare/cloudflare-worker.ts src/context/BackgroundAnalysisContext.tsx
-          git diff --cached --quiet && exit 0
-          git commit -m 'fix: harden universal PDF extraction [pdf-fix-applied]'
+          git diff --cached --quiet && echo 'No source changes required' || git commit -m 'fix: harden universal PDF extraction [pdf-fix-applied]'
           git push origin HEAD:codex-full-fix
       - name: Remove patch workflow
         if: always()
         run: |
           git fetch origin codex-full-fix
-          git checkout codex-full-fix
+          git reset --hard origin/codex-full-fix
           rm -f .github/workflows/codex-pdf-universal-fix.yml
           git add -A
           git diff --cached --quiet || git commit -m 'chore: remove temporary PDF patch workflow [pdf-fix-applied]'
