@@ -154,7 +154,7 @@ Document metadata: ${JSON.stringify({ documentType: payload?.documentType, extra
   parts.push({ text: prompt });
   if (payload?.fileText) parts.push({ text: `Existing extracted text for cross-checking:\n${String(payload.fileText).slice(0, 80000)}` });
   if (Array.isArray(payload?.tableData) && payload.tableData.length > 0) parts.push({ text: `Existing table data for cross-checking:\n${JSON.stringify(payload.tableData).slice(0, 80000)}` });
-  for (const image of images.slice(0, 12)) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
+  for (const image of images) parts.push({ inline_data: { mime_type: image.mimeType, data: image.base64 } });
 
   const requestBody = JSON.stringify({
     contents: [{ role: 'user', parts }],

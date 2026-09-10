@@ -161,7 +161,7 @@ async function processPDFDocument(file: File): Promise<{
     let fullText = '';
     const rawRows: Array<string[]> = [];
 
-    const numPages = Math.min(pdf.numPages, 10);
+    const numPages = pdf.numPages;
 
     for (let pageNum = 1; pageNum <= numPages; pageNum++) {
       const page = await pdf.getPage(pageNum);
@@ -253,9 +253,9 @@ export async function parseUploadedFile(file: File): Promise<ParsedDocumentResul
       fileName: file.name,
       fileType: 'pdf',
       extractedText: pdfContent.extractedText,
-      tableData: hasGenuineTable ? pdfContent.matrix : undefined,
-      rawMatrix: hasGenuineTable ? pdfContent.matrix : undefined,
-      mimeType: 'image/jpeg',
+      tableData: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,
+      rawMatrix: pdfContent.matrix.length > 0 ? pdfContent.matrix : undefined,
+      mimeType: 'application/pdf',
       base64: primaryImage,
       pageImages: pdfContent.pageImages,
       totalRowsCount: hasGenuineTable ? pdfContent.matrix.length : 0
