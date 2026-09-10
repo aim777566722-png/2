@@ -11,7 +11,8 @@ jobs:
   build:
     name: Build Capacitor Android Debug APK
     runs-on: ubuntu-latest
-
+    permissions:
+      contents: write
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -45,6 +46,30 @@ jobs:
 
       - name: Install Dependencies
         run: npm install
+
+      - name: Repair PDF.js render signature if needed
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('src/utils/documentParser.ts')
+          s = p.read_text(encoding='utf-8')
+          old = 'await page.render({ canvasContext: ctx, viewport }).promise;'
+          new = 'await page.render({ canvas, canvasContext: ctx, viewport }).promise;'
+          if old in s:
+              p.write_text(s.replace(old, new), encoding='utf-8')
+              print('PDF.js render signature repaired in working tree.')
+          else:
+              print('PDF.js render signature already correct.')
+          PY
+          if git diff --quiet -- src/utils/documentParser.ts; then
+            echo 'No source repair commit required.'
+          else
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git add src/utils/documentParser.ts
+            git commit -m 'fix: pass canvas to PDF.js render'
+            git push origin HEAD:codex-full-fix
+          fi
 
       - name: TypeScript validation
         run: npm run lint
