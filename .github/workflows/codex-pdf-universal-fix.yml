@@ -1,0 +1,37 @@
+name: Apply Universal PDF Parser Fix
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex-full-fix
+      - name: Remove PDF page limit and add robust page loading
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('src/utils/documentParser.ts')
+          s=p.read_text()
+          old='const numPages = Math.min(pdf.numPages, 10);'
+          new='const numPages = pdf.numPages;'
+          if old not in s:
+              raise SystemExit('Expected PDF page limit not found')
+          s=s.replace(old,new,1)
+          p.write_text(s)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/utils/documentParser.ts
+          git commit -m 'fix: process all PDF pages during extraction'
+          git push origin HEAD:codex-full-fix
+      - name: Remove temporary workflow
+        if: always()
+        run: |
+          rm -f .github/workflows/codex-pdf-universal-fix.yml
+          git add -A
+          git diff --cached --quiet || git commit -m 'chore: remove temporary PDF fix workflow'
+          git push origin HEAD:codex-full-fix || true
