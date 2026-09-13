@@ -289,19 +289,32 @@ export const Storage = {
       const data: any = typeof jsonOrObject === 'string' ? JSON.parse(jsonOrObject) : jsonOrObject;
       if (!data || typeof data !== 'object') return { success: false, counts: {}, error: 'صيغة الملف غير صحيحة' };
       const importedMedicines = Array.isArray(data.medicines) ? data.medicines : [], importedSuppliers = Array.isArray(data.suppliers) ? data.suppliers : [], importedPrices = Array.isArray(data.marketPrices) ? data.marketPrices : [], importedOrders = Array.isArray(data.orders) ? data.orders : [], importedInvoices = Array.isArray(data.invoices) ? data.invoices : [], importedRecs = Array.isArray(data.reconciliations) ? data.reconciliations : [];
-      if (importedMedicines.length > 0) this.saveMedicines(importedMedicines);
-      if (importedSuppliers.length > 0) this.saveSuppliers(importedSuppliers);
-      if (importedPrices.length > 0) this.saveMarketPrices(importedPrices);
-      if (importedOrders.length > 0) this.saveOrders(importedOrders);
-      if (importedInvoices.length > 0) this.saveInvoices(importedInvoices);
-      if (importedRecs.length > 0) { memoryCache.reconciliations = importedRecs; safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, importedRecs); }
+      // An import is a full backup restore. Empty collections must replace
+      // existing data instead of leaving stale records behind.
+      this.saveMedicines(importedMedicines);
+      this.saveSuppliers(importedSuppliers);
+      this.saveMarketPrices(importedPrices);
+      this.saveOrders(importedOrders);
+      this.saveInvoices(importedInvoices);
+      memoryCache.reconciliations = importedRecs;
+      safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, importedRecs);
       return { success: true, counts: { medicines: importedMedicines.length, suppliers: importedSuppliers.length, marketPrices: importedPrices.length, orders: importedOrders.length, invoices: importedInvoices.length, reconciliations: importedRecs.length } };
     } catch (err: any) { return { success: false, counts: {}, error: err?.message || 'فشل استيراد النسخة الاحتياطية' }; }
   },
 
   resetAll() {
     memoryCache.medicines = undefined; memoryCache.suppliers = undefined; memoryCache.marketPrices = undefined; memoryCache.orders = undefined; memoryCache.invoices = undefined; memoryCache.reconciliations = undefined;
-    localStorage.clear();
-    safeLocalStorageSet(STORAGE_KEYS.MEDICINES, INITIAL_MEDICINES); safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS); safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES); safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS); safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
+    Object.values(STORAGE_KEYS).forEach(key => {
+      try {
+        localStorage.removeItem(key);
+        localStorage.removeItem(`${key}${UPDATED_AT_SUFFIX}`);
+      } catch { /* storage may be unavailable */ }
+    });
+    safeLocalStorageSet(STORAGE_KEYS.MEDICINES, INITIAL_MEDICINES);
+    safeLocalStorageSet(STORAGE_KEYS.SUPPLIERS, INITIAL_SUPPLIERS);
+    safeLocalStorageSet(STORAGE_KEYS.MARKET_PRICES, INITIAL_MARKET_PRICES);
+    safeLocalStorageSet(STORAGE_KEYS.ORDERS, INITIAL_ORDERS);
+    safeLocalStorageSet(STORAGE_KEYS.INVOICES, INITIAL_INVOICES);
+    safeLocalStorageSet(STORAGE_KEYS.RECONCILIATIONS, []);
   }
 };

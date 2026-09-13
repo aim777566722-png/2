@@ -10,8 +10,26 @@ export const normalizeOcrText = (value: unknown) => String(value ?? '').replace(
 const compact = (value: unknown) => normalizeOcrText(value).toLowerCase().replace(/[\s:：._\-/]+/g, '');
 function numberOf(value: unknown): number | null { if (typeof value === 'number') return Number.isFinite(value) ? value : null; let s = normalizeOcrText(value).replace(/[٬،]/g, ',').replace(/\s/g, '').replace(/[^0-9.,+-]/g, ''); if (!s) return null; const comma = s.lastIndexOf(','), dot = s.lastIndexOf('.'); if (comma >= 0 && dot >= 0) s = comma > dot ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, ''); else if (comma >= 0) s = /,\d{1,2}$/.test(s) ? s.replace(',', '.') : s.replace(/,/g, ''); const n = Number(s); return Number.isFinite(n) ? n : null; }
 function isNumeric(value: string) { return numberOf(value) !== null && /^[\d٠-٩۰-۹.,٬،+\-\s]+$/.test(value); }
-function isDate(value: string) { const s = normalizeOcrText(value); return /^(?:20\d{2}[/.-]\d{1,2}(?:[/.-]\d{1,2})?|\d{1,2}[/.-]\d{1,2}[/.-](?:20)?\d{2}|\d{1,2}[/.-](?:20)?\d{2})$/.test(s); }
-function cells(row: unknown): string[] { if (Array.isArray(row)) return row.flatMap(value => normalizeOcrText(value).split(/\s*\|\s*/)).map(normalizeOcrText).filter(Boolean); if (row && typeof row === 'object') return Object.values(row).flatMap(value => normalizeOcrText(value).split(/\s*\|\s*/)).map(normalizeOcrText).filter(Boolean); const text = String(row ?? ''); return (text.includes('|') ? text.split(/\s*\|\s*/) : text.includes('\t') ? text.split(/\t+/) : text.split(/\s{2,}/)).map(normalizeOcrText).filter(Boolean); }
+function isDate(value: string) {
+  const s = normalizeOcrText(value);
+  // A dot-separated number such as 12.50 or 10.00 is overwhelmingly more
+  // likely to be a price than an expiry date in an extracted table. Dates
+  // using slashes and hyphens remain supported below.
+  if (/^\d+\.\d{1,2}$/.test(s)) return false;
+  return /^(?:20\d{2}[/.-]\d{1,2}(?:[/.-]\d{1,2})?|\d{1,2}[\/-]\d{1,2}[\/-](?:20)?\d{2}|\d{1,2}[\/-](?:20)?\d{2})$/.test(s);
+}
+function cells(row: unknown): string[] {
+  if (Array.isArray(row)) {
+    // Preserve empty cells in matrix rows. Removing an empty price column
+    // shifts every later value left and makes totals look like unit prices.
+    return row.flatMap(value => normalizeOcrText(value).split(/\s*\|\s*/)).map(normalizeOcrText);
+  }
+  if (row && typeof row === 'object') {
+    return Object.values(row).flatMap(value => normalizeOcrText(value).split(/\s*\|\s*/)).map(normalizeOcrText).filter(Boolean);
+  }
+  const text = String(row ?? '');
+  return (text.includes('|') ? text.split(/\s*\|\s*/) : text.includes('\t') ? text.split(/\t+/) : text.split(/\s{2,}/)).map(normalizeOcrText).filter(Boolean);
+}
 function field(value: string): Field | undefined { const s = compact(value); if (/^(اسمالصنف|اسمالدواء|الصنف|الدواء|البيان|الوصف|المستحضر|itemname|medicine|product|description)$/.test(s)) return 'name'; if (/^(الوحدة|وحدة|unit|units)$/.test(s)) return 'unit'; if (/^(الكمية|كمية|عدد|qty|quantity)$/.test(s)) return 'quantity'; if (/^(بونص|bonus|هدية)$/.test(s)) return 'bonus'; if (/^(السعر|سعر|price|unitprice|rate)$/.test(s)) return 'price'; if (/^(رقمالصنف|كودالصنف|كود|باركود|barcode|code|itemno)$/.test(s)) return 'code'; if (/^(تاريخالانتهاء|تاريخالصلاحية|الصلاحية|انتهاء|expiry|expiration|exp)$/.test(s)) return 'expiry'; if (/^(القيمة|الإجمالي|اجمالي|المجموع|total|amount|value)$/.test(s)) return 'total'; if (/^(م|تسلسل|التسلسل|no|serial|#)$/.test(s)) return 'serial'; }
 export function detectTable(rows: unknown[]): { headerIndex: number; schema: Schema } | null { const all = rows.map(cells); for (let i = 0; i < all.length; i++) { const schema: Schema = {}; all[i].forEach((cell, index) => { const key = field(cell); if (key !== undefined && schema[key] === undefined) schema[key] = index; }); const keys = Object.keys(schema).length; if (schema.name !== undefined && keys >= 3 && (schema.price !== undefined || schema.total !== undefined || schema.quantity !== undefined)) return { headerIndex: i, schema }; } return null; }
 function isJunkName(value: string) { const s = normalizeOcrText(value); return s.length < 2 || isNumeric(s) || isDate(s) || !/[A-Za-z\u0600-\u06FF]/.test(s) || /(?:address|phone|invoice|customer|printed|subtotal|grand total|العنوان|هاتف|رقم الفاتورة|العميل|التاريخ|ملاحظات|الإجمالي|المجموع|طباعة|مدخل البيانات|تاريخ ووقت الإضافة)/i.test(s); }

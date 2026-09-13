@@ -242,7 +242,8 @@ export async function parseUploadedFile(file: File): Promise<ParsedDocumentResul
   // 2. PDF Files (Render high-res page images + Full textual tabular matrix)
   if (mimeType === 'application/pdf' || extension === 'pdf') {
     const pdfContent = await processPDFDocument(file);
-    const primaryImage = pdfContent.pageImages[0] || (await fileToBase64(file));
+    const hasRenderedPages = pdfContent.pageImages.length > 0;
+    const fallbackDocument = hasRenderedPages ? undefined : await fileToBase64(file);
 
     // Filter candidate matrix to check if it actually contains real medicine rows
     // (and not just 1-4 lines of metadata/footer timestamps like "01:44", "Pm 00", "Modernsoftye")
@@ -255,8 +256,8 @@ export async function parseUploadedFile(file: File): Promise<ParsedDocumentResul
       extractedText: pdfContent.extractedText,
       tableData: hasGenuineTable ? pdfContent.matrix : undefined,
       rawMatrix: hasGenuineTable ? pdfContent.matrix : undefined,
-      mimeType: 'image/jpeg',
-      base64: primaryImage,
+      mimeType: hasRenderedPages ? 'image/jpeg' : (file.type || 'application/pdf'),
+      base64: fallbackDocument,
       pageImages: pdfContent.pageImages,
       totalRowsCount: hasGenuineTable ? pdfContent.matrix.length : 0
     };

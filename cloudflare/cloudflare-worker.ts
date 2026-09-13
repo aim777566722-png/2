@@ -39,6 +39,7 @@ function normalizeBase64(value: unknown): string {
 
 function normalizeMimeType(value: unknown): string {
   const mime = typeof value === 'string' ? value.toLowerCase().split(';')[0].trim() : '';
+  if (mime === 'application/pdf') return mime;
   return /^image\/(jpeg|jpg|png|webp|heic|heif)$/.test(mime) ? (mime === 'image/jpg' ? 'image/jpeg' : mime) : 'image/jpeg';
 }
 

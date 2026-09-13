@@ -189,6 +189,7 @@ export const DocumentUploadView: React.FC<DocumentUploadViewProps> = ({
     setProcessingError(null);
 
     const newItems: UploadedFileItem[] = [];
+    const parseErrors: string[] = [];
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
@@ -207,10 +208,16 @@ export const DocumentUploadView: React.FC<DocumentUploadViewProps> = ({
         });
       } catch (err) {
         console.error('Error reading file:', file.name, err);
+        parseErrors.push(file.name);
       }
     }
 
     setUploadedFiles(prev => [...prev, ...newItems]);
+    if (parseErrors.length > 0) {
+      const names = parseErrors.slice(0, 3).join('، ');
+      const suffix = parseErrors.length > 3 ? ` و${parseErrors.length - 3} ملفات أخرى` : '';
+      setProcessingError(`تعذر قراءة ${names}${suffix}. تحقق من نوع الملف ثم حاول مرة أخرى.`);
+    }
   };
 
   const handleRemoveFile = (id: string) => {
@@ -401,7 +408,7 @@ export const DocumentUploadView: React.FC<DocumentUploadViewProps> = ({
       setProcessingError(null);
       const cleanSup = String(supplierName || supplierNameInput || 'مورد الفاتورة').trim();
       const docDate = date || extractedData?.documentDate || new Date().toISOString().split('T')[0];
-      const matchedSupplier = knownSuppliers.find(s => (s.name || '').trim().toLowerCase() === cleanSup.toLowerCase()) || knownSuppliers[0];
+      const matchedSupplier = knownSuppliers.find(s => (s.name || '').trim().toLowerCase() === cleanSup.toLowerCase());
       const supplierId = matchedSupplier?.id || `sup-${cleanSup.replace(/\s+/g, '-').toLowerCase()}`;
 
       if (!matchedSupplier && onAddSupplier && cleanSup) {
