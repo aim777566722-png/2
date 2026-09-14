@@ -351,26 +351,36 @@ export const BackgroundAnalysisProvider: React.FC<{ children: ReactNode }> = ({ 
         if (partyName && (!extracted.partyName || String(extracted.partyName).trim() === '')) extracted.partyName = partyName;
 
         const itemsCount = extracted?.items?.length || 0;
+        const noItemsMessage = analysisMode === 'local'
+          ? 'لم يتعرف التحليل المحلي على أصناف في الصورة. استخدم صورة أوضح تحتوي جدول الأصناف، أو أعد المحاولة بالتحليل بالذكاء الاصطناعي.'
+          : 'لم يتعرف التحليل على أصناف في المستند. تحقق من وضوح الصورة وأنها تحتوي فاتورة أو جدول أصناف.';
 
         setActiveTask(prev => {
           if (!prev || prev.id !== taskId) return prev;
           const completedTask: BackgroundTask = {
             ...prev,
-            status: 'completed',
+            status: itemsCount > 0 ? 'completed' : 'error',
             progress: 100,
-            currentStep: `اكتمل ${analysisMode === 'local' ? 'التحليل المحلي' : 'التحليل بالذكاء الاصطناعي'} بنجاح! تم استخراج ${itemsCount} صنفاً`,
+            currentStep: itemsCount > 0
+              ? `اكتمل ${analysisMode === 'local' ? 'التحليل المحلي' : 'التحليل بالذكاء الاصطناعي'} بنجاح! تم استخراج ${itemsCount} صنفاً`
+              : noItemsMessage,
             currentStageIndex: 4,
             stages: updateStagesStatus(4, true),
             completedAt: Date.now(),
             itemsCount,
-            resultSummary: `${analysisMode === 'local' ? 'تحليل محلي' : 'تحليل بالذكاء الاصطناعي'}: تم استخراج ${itemsCount} صنفاً وجاهزة للمراجعة والتثبيت`,
+            resultSummary: itemsCount > 0
+              ? `${analysisMode === 'local' ? 'تحليل محلي' : 'تحليل بالذكاء الاصطناعي'}: تم استخراج ${itemsCount} صنفاً وجاهزة للمراجعة والتثبيت`
+              : noItemsMessage,
+            error: itemsCount > 0 ? undefined : noItemsMessage,
             logs: [
               {
                 id: `log-${Date.now()}-done`,
                 timestamp: getLogTime(),
-                message: `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً صيدلانياً`,
+                message: itemsCount > 0
+                  ? `تم الانتهاء بنجاح واستخراج ${itemsCount} صنفاً صيدلانياً`
+                  : noItemsMessage,
                 percent: 100,
-                type: 'success'
+                type: itemsCount > 0 ? 'success' : 'warn'
               },
               ...prev.logs
             ],
