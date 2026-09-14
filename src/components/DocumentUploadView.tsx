@@ -153,6 +153,9 @@ export const DocumentUploadView: React.FC<DocumentUploadViewProps> = ({
       }
     } else if (activeTask && activeTask.type === 'document' && activeTask.status === 'processing') {
       setIsProcessing(true);
+    } else if (activeTask && activeTask.type === 'document' && activeTask.status === 'error') {
+      setIsProcessing(false);
+      setProcessingError(activeTask.error || 'فشل تحليل المستند. تحقق من اتصال الخادم أو اختر التحليل المحلي ثم حاول مرة أخرى.');
     }
   }, [activeTask]);
 
