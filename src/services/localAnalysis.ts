@@ -116,17 +116,73 @@ function parseRtlTableRow(row: string[]): ParsedItem | null {
   };
 }
 
+function parseHeuristicRow(row: string[]): ParsedItem | null {
+  const parts = row.flatMap(part => normalizeOcrText(part).split(/\s*\|\s*/)).map(normalizeOcrText).filter(Boolean);
+  if (parts.length < 2) return null;
+
+  const numeric = parts
+    .map((part, index) => ({ index, part, value: numberOf(part) }))
+    .filter(entry => entry.value !== null && isNumeric(entry.part) && !isDate(entry.part) && entry.value > 0) as Array<{ index: number; part: string; value: number }>;
+  if (!numeric.length) return null;
+
+  const nameParts = parts.filter(part => {
+    if (isNumeric(part) || isDate(part) || unit(part)) return false;
+    return /[A-Za-z\u0600-\u06FF]/.test(part) && !/^(?:الصنف|اسم الصنف|الوصف|description|item|product|invoice|فاتورة|الإجمالي|المجموع|total|amount|price|السعر|الكمية|qty|quantity)$/i.test(part);
+  });
+  const nameValue = nameParts.join(' ').replace(/\s+/g, ' ').trim();
+  if (isJunkName(nameValue)) return null;
+
+  const quantityEntry = numeric.find(entry => Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000);
+  const quantity = quantityEntry?.value ?? 1;
+  const priceCandidates = numeric.filter(entry => !quantityEntry || entry.index > quantityEntry.index);
+  if (!priceCandidates.length) return null;
+
+  // Decimal values are the strongest price signal. If there are two prices,
+  // treat the first as unit price and the last as line total.
+  const decimalCandidates = priceCandidates.filter(entry => /[.,٬،]/.test(entry.part));
+  const candidates = decimalCandidates.length ? decimalCandidates : priceCandidates;
+  const unitPrice = candidates[0]?.value ?? 0;
+  if (!unitPrice || unitPrice <= 0) return null;
+  const totalPrice = candidates.length > 1 ? candidates[candidates.length - 1].value : unitPrice * quantity;
+
+  return {
+    id: `local-${Date.now()}-${itemCounter++}`,
+    itemName: nameValue,
+    quantity,
+    unit: 'علبة',
+    unitPrice,
+    totalPrice,
+    bonusScheme: '',
+    discountPercent: 0,
+    notes: '',
+    rawText: parts.join(' | '),
+  };
+}
+
 export function extractItemsFromRows(rows: unknown[]): ParsedItem[] {
-  const table = detectTable(rows); if (!table) return [];
-  const all = rows.map(cells); const result: ParsedItem[] = []; const seen = new Set<string>();
-  const rtl = isRtlTableHeader(all[table.headerIndex]);
-  for (let i = table.headerIndex + 1; i < all.length; i++) {
-    const row = all[i]; if (!row.length) continue;
-    if (row.some(c => field(c) === 'name') && row.some(c => field(c) === 'price' || field(c) === 'total')) continue;
-    const item = rtl ? (parseRtlTableRow(row) || parseTableRow(row, table.schema)) : parseTableRow(row, table.schema);
-    if (!item) continue;
+  const table = detectTable(rows);
+  const all = rows.map(cells);
+  const result: ParsedItem[] = [];
+  const seen = new Set<string>();
+  const add = (item: ParsedItem | null) => {
+    if (!item) return;
     const key = `${compact(item.itemName)}|${item.quantity}|${item.unitPrice}|${item.totalPrice}`;
     if (!seen.has(key)) { seen.add(key); result.push(item); }
+  };
+
+  if (table) {
+    const rtl = isRtlTableHeader(all[table.headerIndex]);
+    for (let i = table.headerIndex + 1; i < all.length; i++) {
+      const row = all[i]; if (!row.length) continue;
+      if (row.some(c => field(c) === 'name') && row.some(c => field(c) === 'price' || field(c) === 'total')) continue;
+      add(rtl ? (parseRtlTableRow(row) || parseTableRow(row, table.schema)) : parseTableRow(row, table.schema));
+    }
+  }
+
+  // OCR often misses or distorts column headers. Do not discard otherwise
+  // usable product/price rows just because detectTable() found no schema.
+  if (!result.length) {
+    for (const row of all) add(parseHeuristicRow(row));
   }
   return result;
 }

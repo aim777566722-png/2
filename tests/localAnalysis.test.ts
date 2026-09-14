@@ -26,6 +26,9 @@ const decimalArabic = [
   ['رقم', 'اسم الصنف', 'الوحدة', 'الكمية', 'السعر', 'القيمة'],
   ['1', 'باراسيتامول 500 مجم', 'علبة', '2', '12.50', '25.00'],
 ];
+const noHeaderRows = [
+  ['1', 'Amoxicillin 500 mg', 'box', '2', '12.50', '25.00'],
+];
 
 assert.equal(normalizeOcrText('١٢٣ ۴۵'), '123 45');
 assert.ok(detectTable(rtl));
@@ -56,6 +59,10 @@ const decimal = extractItemsFromRows(decimalArabic);
 assert.equal(decimal.length, 1, 'decimal prices must not be discarded as dates');
 assert.equal(decimal[0].unitPrice, 12.5);
 assert.equal(decimal[0].totalPrice, 25);
+const heuristic = extractItemsFromRows(noHeaderRows);
+assert.equal(heuristic.length, 1, 'rows must still be parsed when OCR misses table headers');
+assert.equal(heuristic[0].unitPrice, 12.5);
+assert.equal(heuristic[0].totalPrice, 25);
 assert.deepEqual(extractItemsFromRows([['Phone', '123'], ['no table here']]), []);
 assert.equal(extractItemsFromRows([...ltr, ltr[1]]).length, 2, 'exact duplicate rows are removed');
 assert.equal(extractItemsFromRows([...ltr, ltr[0], ['90', 'Ibuprofen 400 mg', 'box', '1', '7.25', '7.25', '']]).length, 3, 'a repeated page header is skipped while the next page item is retained');

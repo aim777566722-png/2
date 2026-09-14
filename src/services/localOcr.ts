@@ -208,9 +208,11 @@ function buildLayoutText(words: LayoutWord[]): string {
       else previousCell.push(word);
     }
 
-    // The source table is Arabic/RTL. Return cells right-to-left so the parser sees
-    // the natural document order: code | name | unit | quantity | bonus | price | batch | expiry.
-    const orderedCells = [...cells].reverse();
+    // Keep English/LTR rows in their natural order. Arabic rows need to be
+    // reversed so the parser sees: code | name | unit | quantity | price...
+    const orderedCells = isArabicText(row.map(word => word.text).join(' '))
+      ? [...cells].reverse()
+      : cells;
     return orderedCells.map(buildCell).filter(Boolean).join(' | ').trim();
   }).filter(Boolean).join('\n');
 }
