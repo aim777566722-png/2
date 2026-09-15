@@ -116,34 +116,60 @@ function parseRtlTableRow(row: string[]): ParsedItem | null {
   };
 }
 
+function numericTokens(parts: string[]): Array<{ index: number; part: string; value: number }> {
+  return parts
+    .map((part, index) => ({ index, part: normalizeOcrText(part), value: numberOf(part) }))
+    .filter((entry): entry is { index: number; part: string; value: number } =>
+      entry.value !== null && isNumeric(entry.part) && !isDate(entry.part)
+    );
+}
+
 function parseHeuristicRow(row: string[]): ParsedItem | null {
-  const parts = row.flatMap(part => normalizeOcrText(part).split(/\s*\|\s*/)).map(normalizeOcrText).filter(Boolean);
+  // OCR may return the whole product row as one cell, for example:
+  // "جينسولين ... 4,470.00 3.00 0.00 a 119044".
+  // Split that cell into tokens before deciding which values are columns.
+  const parts = row
+    .flatMap(part => normalizeOcrText(part).split(/\s*\|\s*/))
+    .flatMap(part => normalizeOcrText(part).split(/\s+/))
+    .map(normalizeOcrText)
+    .filter(Boolean);
   if (parts.length < 2) return null;
 
-  const numeric = parts
-    .map((part, index) => ({ index, part, value: numberOf(part) }))
-    .filter(entry => entry.value !== null && isNumeric(entry.part) && !isDate(entry.part) && entry.value > 0) as Array<{ index: number; part: string; value: number }>;
+  const numeric = numericTokens(parts);
   if (!numeric.length) return null;
 
-  const nameParts = parts.filter(part => {
-    if (isNumeric(part) || isDate(part) || unit(part)) return false;
+  const first = numeric[0];
+  const serialIndex = first.index === 0 && Number.isInteger(first.value) && first.value >= 1 && first.value <= 999
+    ? first.index
+    : -1;
+  const codeIndex = [...numeric]
+    .reverse()
+    .find(entry => !/[.,٬،]/.test(entry.part) && integerDigits(entry.part) >= 5)?.index ?? -1;
+  const data = numeric.filter(entry => entry.index !== serialIndex && entry.index !== codeIndex);
+  const positiveData = data.filter(entry => entry.value > 0);
+  if (!positiveData.length) return null;
+
+  // In the common supplier layout the numeric columns are price, quantity,
+  // bonus/discount, followed by the item code. Prefer the first positive
+  // value as the price; decimal formatting is a useful tie-breaker only.
+  const priceEntry = positiveData[0];
+  const quantityEntry = data.find(entry =>
+    entry.index > priceEntry.index && Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000
+  );
+  const quantity = quantityEntry?.value ?? 1;
+  const bonusEntry = quantityEntry
+    ? data.find(entry => entry.index > quantityEntry.index && entry.value >= 0 && entry.value <= 10000)
+    : undefined;
+  const unitPrice = priceEntry.value;
+  if (!Number.isFinite(unitPrice) || unitPrice <= 0) return null;
+
+  const excluded = new Set([serialIndex, codeIndex]);
+  const nameParts = parts.filter((part, index) => {
+    if (excluded.has(index) || isNumeric(part) || isDate(part) || unit(part)) return false;
     return /[A-Za-z\u0600-\u06FF]/.test(part) && !/^(?:الصنف|اسم الصنف|الوصف|description|item|product|invoice|فاتورة|الإجمالي|المجموع|total|amount|price|السعر|الكمية|qty|quantity)$/i.test(part);
   });
   const nameValue = nameParts.join(' ').replace(/\s+/g, ' ').trim();
   if (isJunkName(nameValue)) return null;
-
-  const quantityEntry = numeric.find(entry => Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000);
-  const quantity = quantityEntry?.value ?? 1;
-  const priceCandidates = numeric.filter(entry => !quantityEntry || entry.index > quantityEntry.index);
-  if (!priceCandidates.length) return null;
-
-  // Decimal values are the strongest price signal. If there are two prices,
-  // treat the first as unit price and the last as line total.
-  const decimalCandidates = priceCandidates.filter(entry => /[.,٬،]/.test(entry.part));
-  const candidates = decimalCandidates.length ? decimalCandidates : priceCandidates;
-  const unitPrice = candidates[0]?.value ?? 0;
-  if (!unitPrice || unitPrice <= 0) return null;
-  const totalPrice = candidates.length > 1 ? candidates[candidates.length - 1].value : unitPrice * quantity;
 
   return {
     id: `local-${Date.now()}-${itemCounter++}`,
@@ -151,11 +177,11 @@ function parseHeuristicRow(row: string[]): ParsedItem | null {
     quantity,
     unit: 'علبة',
     unitPrice,
-    totalPrice,
-    bonusScheme: '',
+    totalPrice: unitPrice * quantity,
+    bonusScheme: bonusEntry ? String(bonusEntry.value) : '',
     discountPercent: 0,
     notes: '',
-    rawText: parts.join(' | '),
+    rawText: row.join(' | '),
   };
 }
 
