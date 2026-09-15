@@ -127,7 +127,6 @@ function numericTokens(parts: string[]): Array<{ index: number; part: string; va
 function parseHeuristicRow(row: string[]): ParsedItem | null {
   // OCR may return the whole product row as one cell, for example:
   // "جينسولين ... 4,470.00 3.00 0.00 a 119044".
-  // Split that cell into tokens before deciding which values are columns.
   const parts = row
     .flatMap(part => normalizeOcrText(part).split(/\s*\|\s*/))
     .flatMap(part => normalizeOcrText(part).split(/\s+/))
@@ -137,7 +136,6 @@ function parseHeuristicRow(row: string[]): ParsedItem | null {
 
   const numeric = numericTokens(parts);
   if (!numeric.length) return null;
-
   const first = numeric[0];
   const serialIndex = first.index === 0 && Number.isInteger(first.value) && first.value >= 1 && first.value <= 999
     ? first.index
@@ -149,26 +147,40 @@ function parseHeuristicRow(row: string[]): ParsedItem | null {
   const positiveData = data.filter(entry => entry.value > 0);
   if (!positiveData.length) return null;
 
-  // In the common supplier layout the numeric columns are price, quantity,
-  // bonus/discount, followed by the item code. Prefer the first positive
-  // value as the price; decimal formatting is a useful tie-breaker only.
-  const priceEntry = positiveData[0];
-  const quantityEntry = data.find(entry =>
-    entry.index > priceEntry.index && Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000
-  );
+  const isNameToken = (part: string) =>
+    !isNumeric(part) && !isDate(part) && !unit(part) &&
+    /[A-Za-z\u0600-\u06FF]/.test(part) &&
+    !/^(?:الصنف|اسم الصنف|الوصف|description|item|product|invoice|فاتورة|الإجمالي|المجموع|total|amount|price|السعر|الكمية|qty|quantity)$/i.test(part);
+  const textIndexes = parts.map((part, index) => isNameToken(part) ? index : -1).filter(index => index >= 0);
+  const dataMin = Math.min(...data.map(entry => entry.index));
+  const dataMax = Math.max(...data.map(entry => entry.index));
+  const beforeData = textIndexes.filter(index => index < dataMin).length;
+  const afterData = textIndexes.filter(index => index > dataMax).length;
+  const reversed = afterData > beforeData;
+
+  // For LTR-like rows the price starts the numeric block; for reversed
+  // Arabic rows it is the last numeric value immediately before the name.
+  const priceEntry = reversed
+    ? [...positiveData].reverse().find(entry => entry.index < dataMin) || positiveData[positiveData.length - 1]
+    : positiveData.find(entry => entry.index > dataMax || entry.index >= dataMin) || positiveData[0];
+  const quantityEntry = reversed
+    ? [...data].reverse().find(entry => entry.index < priceEntry.index && Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000)
+    : data.find(entry => entry.index > priceEntry.index && Number.isInteger(entry.value) && entry.value >= 1 && entry.value <= 10000);
   const quantity = quantityEntry?.value ?? 1;
   const bonusEntry = quantityEntry
-    ? data.find(entry => entry.index > quantityEntry.index && entry.value >= 0 && entry.value <= 10000)
+    ? (reversed
+      ? [...data].reverse().find(entry => entry.index < quantityEntry.index && entry.value >= 0 && entry.value <= 10000)
+      : data.find(entry => entry.index > quantityEntry.index && entry.value >= 0 && entry.value <= 10000))
     : undefined;
   const unitPrice = priceEntry.value;
   if (!Number.isFinite(unitPrice) || unitPrice <= 0) return null;
 
-  const excluded = new Set([serialIndex, codeIndex]);
-  const nameParts = parts.filter((part, index) => {
-    if (excluded.has(index) || isNumeric(part) || isDate(part) || unit(part)) return false;
-    return /[A-Za-z\u0600-\u06FF]/.test(part) && !/^(?:الصنف|اسم الصنف|الوصف|description|item|product|invoice|فاتورة|الإجمالي|المجموع|total|amount|price|السعر|الكمية|qty|quantity)$/i.test(part);
-  });
-  const nameValue = nameParts.join(' ').replace(/\s+/g, ' ').trim();
+  const nameIndexes = textIndexes.filter(index => reversed ? index > dataMax : index < dataMin);
+  const nameValue = (nameIndexes.length ? nameIndexes : textIndexes)
+    .map(index => parts[index])
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   if (isJunkName(nameValue)) return null;
 
   return {
